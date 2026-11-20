@@ -16,7 +16,7 @@
 
 确认基线后 `git fetch`、更新 `main` 并建 `release/<version>` 分支
 
-检查 `http://127.0.0.1:9222/json/version`，未启动就执行 `chrome cdp`，再用 `playwright.chromium.connectOverCDP('http://127.0.0.1:9222')` 连接。缺少 Playwright 时装到 `/tmp`，不全局安装
+检查 `http://127.0.0.1:9222/json/version`，未启动就执行 `chrome cdp`，再用 `playwright.chromium.connectOverCDP('http://127.0.0.1:9222', { noDefaults: true })` 连接，沿用发布浏览器现有的下载等设置。缺少 Playwright 时装到 `/tmp`，不全局安装
 
 复用一个商店页面，先核对发布者、扩展 ID、线上／草稿版本和审核状态
 

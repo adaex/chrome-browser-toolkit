@@ -1,4 +1,11 @@
-import { noteGroupObject, resolveGroupObject, syncGroupObjects } from './groupCache.js';
+import {
+  consumeColdMiss,
+  noteGroupObject,
+  rebuildGroupCache,
+  resolveGroupObject,
+  syncGroupObjects,
+  trackGroupObjectChanges,
+} from './groupCache.js';
 import { effectiveUrl } from './tabs.js';
 
 // 类型定义
@@ -23,14 +30,41 @@ interface GroupSnapshot {
 //   tabg:g:<groupId>              -> 存活组的快照，每组一个 key；键集合本身就是存活组真相
 //   tabg:a:<groupId>:<删除毫秒时间戳>:<随机ID> -> 已删除组的归档，只增不删，恢复靠人工读 JSON
 const META_KEY = 'tabg:meta';
-export const ACTIVE_PREFIX = 'tabg:g:';
-export const ARCHIVE_PREFIX = 'tabg:a:';
-export const LEGACY_KEY = 'tabGroupBackup'; // v1 的单 key，首次 init 时一次性迁移
+const ACTIVE_PREFIX = 'tabg:g:';
+const ARCHIVE_PREFIX = 'tabg:a:';
+const LEGACY_KEY = 'tabGroupBackup'; // v1 的单 key，首次 init 时一次性迁移
 const INIT_THROTTLE_MS = 5 * 60 * 1000; // SW 频繁重启，全量 init 5 分钟最多一次
 
 const activeKey = (groupId: number) => `${ACTIVE_PREFIX}${groupId}`;
 const archiveKey = (groupId: number, deletedAtMs: number) =>
   `${ARCHIVE_PREFIX}${groupId}:${deletedAtMs}:${crypto.randomUUID()}`;
+
+function activeIdOf(key: string): number | undefined {
+  if (!key.startsWith(ACTIVE_PREFIX)) return;
+  const id = Number(key.slice(ACTIVE_PREFIX.length));
+  if (Number.isSafeInteger(id) && id >= 0 && key === activeKey(id)) return id;
+}
+
+function backupKind(key: string) {
+  if (activeIdOf(key) !== undefined) return 'active';
+  if (key.startsWith(ARCHIVE_PREFIX)) return 'archived';
+  if (key === LEGACY_KEY) return 'legacy';
+}
+
+export async function readBackups(includeEntries: boolean) {
+  const storage = chrome.storage.local;
+  // 归档会更换键名，查看和导出必须在同一次读取中取得键和值；只计数时优先只取键名
+  const stored = includeEntries || typeof storage.getKeys !== 'function' ? await storage.get(null) : undefined;
+  const keys = stored ? Object.keys(stored) : await storage.getKeys();
+  const result = { active: 0, archived: 0, legacy: 0, entries: includeEntries ? stored : undefined };
+  for (const key of keys) {
+    const kind = backupKind(key);
+    if (kind) result[kind]++;
+    // 编号异常的原始条目仍可导出供人工查看，但不计入有效编号的快照数
+    else if (result.entries && !key.startsWith(ACTIVE_PREFIX)) delete result.entries[key];
+  }
+  return result;
+}
 
 async function readLastInitAt(): Promise<number> {
   const result = await chrome.storage.local.get(META_KEY);
@@ -106,17 +140,18 @@ function archiveEntry(snapshot: GroupSnapshot, deletedAtMs: number): [string, Gr
   ];
 }
 
-// 把某个标签组的当前状态拍成快照
-function snapshotGroup(group: TabGroup, tabs: chrome.tabs.Tab[], updatedAt: string): GroupSnapshot {
-  return {
-    id: group.id,
-    title: group.title ?? '',
-    color: group.color,
-    tabs: tabs
-      .map(tab => ({ url: effectiveUrl(tab), title: tab.title ?? '' }))
-      .filter(tab => tab.url),
-    updatedAt,
-  };
+// 入参是该组独有的标签数组。没有有效网址时不生成快照，保留上次备份
+function snapshotTabs(tabs: chrome.tabs.Tab[]): TabSnapshot[] | undefined {
+  const entries: TabSnapshot[] = [];
+  for (const tab of tabs.sort((a, b) => a.index - b.index)) {
+    const url = effectiveUrl(tab);
+    if (url) entries.push({ url, title: tab.title ?? '' });
+  }
+  return entries.length ? entries : undefined;
+}
+
+function snapshotGroup(group: TabGroup, tabs: TabSnapshot[], updatedAt: string): GroupSnapshot {
+  return { id: group.id, title: group.title ?? '', color: group.color, tabs, updatedAt };
 }
 
 // updatedAt 只记录拍照时间；内容没变时无需为了刷新时间戳再写一次存储
@@ -152,21 +187,26 @@ async function snapshotFingerprint(snapshot: GroupSnapshot): Promise<string> {
 // 当前 SW 内已确认与存储一致的 active 指纹；complete/title 重复事件无需再写相同快照
 // 不为此增加存储读取；SW 重启后缓存自然清空，首次备份仍保守写入
 const activeSnapshotCache = new Map<number, string>();
+const unfinishedArchives = new Set<number>();
 
 // 备份单个标签组：只写这一个组的 key，不读不写其他数据
-export async function backupGroup(groupId: number) {
+export async function backupGroup(groupId: number, isCurrent = () => true) {
+  // 编号被复用时，旧快照必须先成功归档，新组才能占用同一个键
+  if (unfinishedArchives.has(groupId)) await archiveGroup(groupId);
   const tabs = await chrome.tabs.query({ groupId });
-  // 空组保留最后 active，供 onRemoved 或下次 init 统一归档
-  if (!tabs.length) return;
+  if (!isCurrent()) return;
+  const entries = snapshotTabs(tabs);
+  if (!entries) return;
 
   let group = resolveGroupObject(groupId);
   if (!group) {
     const fetched = await chrome.tabGroups.get(groupId);
+    if (!isCurrent()) return;
     // get 期间若来了 onUpdated，保留事件刚写入的新对象
     group = resolveGroupObject(groupId) ?? fetched;
     noteGroupObject(group);
   }
-  const next = snapshotGroup(group, tabs, new Date().toISOString());
+  const next = snapshotGroup(group, entries, new Date().toISOString());
   const fingerprint = await snapshotFingerprint(next);
   if (activeSnapshotCache.get(groupId) === fingerprint) return;
 
@@ -179,22 +219,45 @@ export async function backupGroup(groupId: number) {
 export async function archiveGroup(groupId: number) {
   // 归档可能改变或移除 active；先失效，失败时也只是后续备份多写一次
   activeSnapshotCache.delete(groupId);
+  unfinishedArchives.add(groupId);
   const key = activeKey(groupId);
   const result = await chrome.storage.local.get(key);
   const snapshot = sanitizeSnapshot(result[key]);
-  if (!snapshot) return;
-
-  const [archiveK, archiveV] = archiveEntry(snapshot, Date.now());
-  await chrome.storage.local.set({ [archiveK]: archiveV });
-  await chrome.storage.local.remove(key);
+  if (snapshot) {
+    const [archiveK, archiveV] = archiveEntry(snapshot, Date.now());
+    await chrome.storage.local.set({ [archiveK]: archiveV });
+    await chrome.storage.local.remove(key);
+  }
+  unfinishedArchives.delete(groupId);
 }
 
 // 启动时全量对账：刷新存活组、把存储中已不存在的组移入归档、顺带迁移 v1 数据。
-// allTabs 由调用方先查好（重建归属缓存要用），组内在 JS 里按 groupId 聚合，不再每组一次 query。
-// force=true 表示唤醒后有归属事件抢跑，无视节流、以最新标签状态强刷一次
-export async function initBackupAllGroups(allTabs: chrome.tabs.Tab[], force = false) {
-  if (!force && Date.now() - (await readLastInitAt()) < INIT_THROTTLE_MS) return;
+// 从第一次标签查询前开始跟踪删除事件，直到写入完成，避免跨组拼接快照
+export function initBackupAllGroups(allTabs?: chrome.tabs.Tab[], force = false) {
+  return trackGroupObjectChanges(async () => {
+    let tabs = allTabs ?? await rebuildGroupCache();
+    if (!allTabs && consumeColdMiss()) {
+      tabs = await rebuildGroupCache();
+      force = true;
+    }
+    if (!force) {
+      const lastInitAt = await readLastInitAt();
+      const elapsed = Date.now() - lastInitAt;
+      if (elapsed >= 0 && elapsed < INIT_THROTTLE_MS) return;
+    }
+    await reconcileBackup(tabs);
+  });
+}
 
+function isLegacyBackup(value: unknown): value is { active?: Record<string, unknown>; archived?: unknown[] } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const { version, active, archived } = value as Record<string, unknown>;
+  return (version === undefined || version === 1) && (active !== undefined || archived !== undefined) &&
+    (active === undefined || (active !== null && typeof active === 'object' && !Array.isArray(active))) &&
+    (archived === undefined || Array.isArray(archived));
+}
+
+async function reconcileBackup(allTabs: chrome.tabs.Tab[]) {
   // 对账可能分批写 active、删旧 key；任一步失败都只损失缓存命中，后续备份会保守重写
   activeSnapshotCache.clear();
 
@@ -222,8 +285,8 @@ export async function initBackupAllGroups(allTabs: chrome.tabs.Tab[], force = fa
   const storedActiveIds = new Set<number>();
   const canonicalActiveIds = new Set<number>();
   for (const key of storedKeys) {
-    if (!key.startsWith(ACTIVE_PREFIX)) continue;
-    const id = Number(key.slice(ACTIVE_PREFIX.length));
+    const id = activeIdOf(key);
+    if (id === undefined) continue;
     storedActiveIds.add(id);
     if (fullRecord) {
       const snapshot = sanitizeSnapshot(fullRecord[key]);
@@ -248,16 +311,11 @@ export async function initBackupAllGroups(allTabs: chrome.tabs.Tab[], force = fa
 
   const toSet: Record<string, unknown> = {};
   const toRemove: string[] = [];
-  const currentFingerprints = new Map<number, string>();
+  const currentSnapshots: GroupSnapshot[] = [];
 
   // v1 迁移：旧的单 key 对象拆进 v2 布局，随本次 init 落盘后删除旧 key
-  if (legacy && typeof legacy === 'object') {
-    const v1 = legacy as Record<string, unknown>;
-    const legacyActive =
-      v1.active && typeof v1.active === 'object'
-        ? (v1.active as Record<string, unknown>)
-        : {};
-    for (const value of Object.values(legacyActive)) {
+  if (isLegacyBackup(legacy)) {
+    for (const value of Object.values(legacy.active ?? {})) {
       const snapshot = sanitizeSnapshot(value);
       if (!snapshot) continue;
       storedActiveIds.add(snapshot.id);
@@ -267,8 +325,8 @@ export async function initBackupAllGroups(allTabs: chrome.tabs.Tab[], force = fa
         toSet[activeKey(snapshot.id)] = snapshot;
       }
     }
-    if (Array.isArray(v1.archived)) {
-      for (const item of v1.archived) {
+    if (legacy.archived) {
+      for (const item of legacy.archived) {
         const snapshot = sanitizeSnapshot(item);
         if (!snapshot) continue;
         const parsedDeletedAt = Date.parse(snapshot.deletedAt ?? '');
@@ -293,21 +351,21 @@ export async function initBackupAllGroups(allTabs: chrome.tabs.Tab[], force = fa
 
   const tabsByGroup = new Map<number, chrome.tabs.Tab[]>();
   for (const tab of allTabs) {
-    if (tab.groupId > 0) {
+    if (tab.groupId >= 0) {
       const list = tabsByGroup.get(tab.groupId);
       if (list) list.push(tab);
       else tabsByGroup.set(tab.groupId, [tab]);
     }
   }
 
-  syncGroupObjects(groups);
-
+  const snapshotGroups = syncGroupObjects(groups, liveIds);
   const now = new Date().toISOString();
-  for (const group of groups) {
+  for (const group of snapshotGroups) {
     const tabs = tabsByGroup.get(group.id);
-    // 查询间隙组可能正在删除：空组不写新快照，也不删 active，交给 onRemoved 或下次 init 归档
-    if (!tabs || !tabs.length) continue;
-    const next = snapshotGroup(group, tabs, now);
+    const entries = tabs && snapshotTabs(tabs);
+    // 查询间隙变空的组保留最后 active，交给 onRemoved 或下次 init 归档
+    if (!entries) continue;
+    const next = snapshotGroup(group, entries, now);
     const key = activeKey(group.id);
     const previous = prior.get(group.id);
     // 全量对账只落盘新增、非规范或内容变化的组；规范且未变的快照保留原 updatedAt
@@ -315,7 +373,7 @@ export async function initBackupAllGroups(allTabs: chrome.tabs.Tab[], force = fa
     if (key in toSet || !previous || !canonicalActiveIds.has(group.id) || !sameSnapshotContent(previous, next)) {
       toSet[key] = next;
     }
-    currentFingerprints.set(group.id, await snapshotFingerprint(next));
+    currentSnapshots.push(next);
   }
 
   // 先写后删：归档或迁移写入失败时保留旧数据，删除失败至多下次产生重复归档
@@ -323,5 +381,7 @@ export async function initBackupAllGroups(allTabs: chrome.tabs.Tab[], force = fa
   if (toRemove.length) await storage.remove(toRemove);
   // meta 最后写：它的时间戳代表本次对账真正完成
   await storage.set({ [META_KEY]: { lastInitAt: Date.now() } });
-  for (const [id, fingerprint] of currentFingerprints) activeSnapshotCache.set(id, fingerprint);
+  for (const snapshot of currentSnapshots) {
+    activeSnapshotCache.set(snapshot.id, await snapshotFingerprint(snapshot));
+  }
 }

@@ -4,45 +4,34 @@ import test from 'node:test';
 import { Queue } from '../dist/worker/queue.js';
 import { flush } from './helpers.mjs';
 
-test('任务积压时保持并发上限和入队顺序，排空后仍可复用', async () => {
-  const queue = new Queue(2);
-  const started = [];
-  let active = 0;
-  let maxActive = 0;
-
-  for (let i = 0; i < 200; i++) {
-    queue.run(async () => {
-      started.push(i);
-      active++;
-      maxActive = Math.max(maxActive, active);
-      await Promise.resolve();
-      active--;
-    });
-  }
+test('同一队列按顺序执行，等待期间不阻塞其他队列', async () => {
+  const tabs = new Queue();
+  const proxy = new Queue();
+  const calls = [];
+  let release;
+  tabs.run(async () => {
+    calls.push('开始备份');
+    await new Promise(resolve => { release = resolve; });
+    calls.push('完成备份');
+  });
+  tabs.run(async () => { calls.push('检查标签'); });
+  proxy.run(async () => { calls.push('切换代理'); });
   await flush();
+  assert.deepEqual(calls, ['开始备份', '切换代理']);
 
-  assert.deepEqual(started, Array.from({ length: 200 }, (_, i) => i));
-  assert.equal(maxActive, 2);
-
-  let ranAfterDrain = false;
-  queue.run(async () => { ranAfterDrain = true; });
+  release();
   await flush();
-  assert.equal(ranAfterDrain, true);
+  assert.deepEqual(calls, ['开始备份', '切换代理', '完成备份', '检查标签']);
 });
 
-test('任务同步抛错会记录并释放并发名额，后续任务继续执行', async () => {
-  const queue = new Queue(1);
-  const errors = [];
-  const originalError = console.error;
-  console.error = (...args) => errors.push(args);
-  try {
-    queue.run(() => { throw new Error('模拟同步失败'); });
-    let continued = false;
-    queue.run(async () => { continued = true; });
-    await flush();
-    assert.equal(continued, true);
-    assert.equal(errors.length, 1);
-  } finally {
-    console.error = originalError;
-  }
+test('同步抛错和异步失败都不影响后续任务', async t => {
+  const queue = new Queue();
+  const errors = t.mock.method(console, 'error', () => {}).mock;
+  queue.run(() => { throw new Error('模拟同步失败'); });
+  queue.run(async () => { throw new Error('模拟异步失败'); });
+  let continued = false;
+  queue.run(async () => { continued = true; });
+  await flush();
+  assert.equal(continued, true);
+  assert.equal(errors.callCount(), 2);
 });

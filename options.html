@@ -275,13 +275,14 @@
           </div>
           <div class="backup-actions">
             <button id="refresh" class="button" type="button">刷新</button>
-            <button id="export" class="button" type="button" disabled>导出 JSON</button>
+            <button id="export" class="button" type="button">导出最新备份</button>
           </div>
         </div>
         <p id="backup-status" class="status" role="status" aria-live="polite"></p>
-        <details>
+        <p id="export-status" class="status" role="status" aria-live="polite" hidden></p>
+        <details id="backup-details">
           <summary>查看备份 JSON</summary>
-          <pre id="backup-output">正在读取…</pre>
+          <pre id="backup-output"></pre>
         </details>
       </section>
     </main>

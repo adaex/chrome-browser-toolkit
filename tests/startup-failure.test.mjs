@@ -4,25 +4,21 @@ import test from 'node:test';
 import { createEventRegistry, createProxyIndicatorMock, createStorage, flush, snapshot } from './helpers.mjs';
 
 test('启动标签查询失败时中止对账并保留旧快照', async () => {
-  const { event } = createEventRegistry();
+  const { tabEvents, groupEvents } = createEventRegistry();
   const local = createStorage({ 'tabg:g:1': snapshot });
   let groupQueries = 0;
   globalThis.chrome = {
     ...createProxyIndicatorMock(),
     tabs: {
       async query() { throw new Error('模拟启动查询失败'); },
-      onCreated: event('created'),
-      onUpdated: event('updated'),
-      onRemoved: event('removed'),
-      onDetached: event('detached'),
+      ...tabEvents,
     },
     tabGroups: {
+      ...groupEvents,
       async query() {
         groupQueries++;
         return [];
       },
-      onUpdated: event('groupUpdated'),
-      onRemoved: event('groupRemoved'),
     },
     storage: { local },
   };

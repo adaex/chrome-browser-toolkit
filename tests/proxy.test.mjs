@@ -159,17 +159,19 @@ test('端口保存后立即用于本机代理，直连时不修改代理设置',
   assert.equal(await loadProxyPort(), 2080);
 });
 
-test('其他扩展控制代理时仍可保存端口，但不抢控制权', async () => {
-  const { local, sets } = installChrome({
-    value: localSocks(7890),
-    levelOfControl: 'controlled_by_other_extensions',
+for (const levelOfControl of ['controllable_by_this_extension', 'not_controllable', 'controlled_by_other_extensions']) {
+  test(`代理不归本扩展控制时只保存端口，不改变代理（${levelOfControl}）`, async () => {
+    const { local, sets } = installChrome({ value: localSocks(7890), levelOfControl });
+
+    await applyProxyWrite({ operation: 'savePort', port: 9000 });
+
+    assert.equal(sets.length, 0);
+    assert.equal(local.data.proxyPort, 9000);
+    const status = await readProxyStatus();
+    assert.equal(status.port, 7890);
+    assert.equal(status.portToApply, levelOfControl === 'controllable_by_this_extension' ? 9000 : undefined);
   });
-
-  await applyProxyWrite({ operation: 'savePort', port: 9000 });
-
-  assert.equal(sets.length, 0);
-  assert.equal(local.data.proxyPort, 9000);
-});
+}
 
 test('实时代理端口已更新但存储失败时回滚到原端口', async () => {
   const { local, sets } = installChrome({

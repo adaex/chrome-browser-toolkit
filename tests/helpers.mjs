@@ -1,3 +1,11 @@
+import assert from 'node:assert/strict';
+
+export function onlyArchive(local, groupId) {
+  const keys = Object.keys(local.data).filter(key => key.startsWith(`tabg:a:${groupId}:`));
+  assert.equal(keys.length, 1, `标签组 ${groupId} 应只有一份归档`);
+  return local.data[keys[0]];
+}
+
 export function createStorage(initial = {}, { failSet = () => false } = {}) {
   const data = structuredClone(initial);
   const writes = [];
@@ -30,15 +38,18 @@ export function createStorage(initial = {}, { failSet = () => false } = {}) {
 
 export function createEventRegistry() {
   const listeners = {};
+  const event = name => ({ addListener(listener) { listeners[name] = listener; } });
   return {
     listeners,
-    event(name) {
-      return {
-        addListener(listener) {
-          listeners[name] = listener;
-        },
-      };
+    event,
+    tabEvents: {
+      onCreated: event('created'),
+      onUpdated: event('updated'),
+      onRemoved: event('removed'),
+      onMoved: event('moved'),
+      onDetached: event('detached'),
     },
+    groupEvents: { onUpdated: event('groupUpdated'), onRemoved: event('groupRemoved') },
   };
 }
 

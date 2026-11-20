@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { archiveGroup, backupGroup, initBackupAllGroups } from '../dist/worker/backup.js';
+import { archiveGroup, backupGroup, initBackupAllGroups, readBackups } from '../dist/worker/backup.js';
 import { forgetGroupObject, noteGroupObject } from '../dist/worker/groupCache.js';
-import { createStorage, group, snapshot } from './helpers.mjs';
+import { createStorage, group, onlyArchive, snapshot } from './helpers.mjs';
 
 test('归档写入失败时保留旧 active 快照', async () => {
   const local = createStorage(
@@ -18,6 +18,31 @@ test('归档写入失败时保留旧 active 快照', async () => {
   await assert.rejects(initBackupAllGroups([], false));
   assert.deepEqual(local.data['tabg:g:1'], snapshot);
   assert.equal(local.removals.length, 0);
+});
+
+test('旧组归档失败期间保留快照，恢复后才允许同编号的新组写入', async () => {
+  let failed = true;
+  const local = createStorage({ 'tabg:g:11': { ...snapshot, id: 11 } }, {
+    failSet: values => failed && Object.keys(values).some(key => key.startsWith('tabg:a:')),
+  });
+  globalThis.chrome = { storage: { local }, tabs: { async query() { return snapshot.tabs; } } };
+  noteGroupObject({ ...group, id: 11, title: '新组' });
+  await assert.rejects(archiveGroup(11));
+  await assert.rejects(backupGroup(11));
+  assert.equal(local.data['tabg:g:11'].title, snapshot.title);
+  failed = false;
+  await backupGroup(11);
+  assert.equal(onlyArchive(local, 11).title, snapshot.title);
+  assert.equal(local.data['tabg:g:11'].title, '新组');
+});
+
+test('无法识别的备份格式保留原始数据供导出', async () => {
+  for (const legacy of [{ groups: [snapshot] }, { version: 2, active: {}, archived: [snapshot] }]) {
+    const local = createStorage({ tabGroupBackup: legacy });
+    globalThis.chrome = { storage: { local }, tabGroups: { async query() { return []; } } };
+    await initBackupAllGroups([], true);
+    assert.deepEqual((await readBackups(true)).entries, { tabGroupBackup: legacy });
+  }
 });
 
 for (const cached of [true, false]) {
@@ -43,9 +68,7 @@ for (const cached of [true, false]) {
 
     assert.equal(groupReads, 0);
     assert.equal(local.data['tabg:g:1'], undefined);
-    const archives = Object.keys(local.data).filter(key => key.startsWith('tabg:a:1:'));
-    assert.equal(archives.length, 1);
-    assert.deepEqual(local.data[archives[0]].tabs, snapshot.tabs);
+    assert.deepEqual(onlyArchive(local, group.id).tabs, snapshot.tabs);
   });
 }
 
@@ -179,8 +202,7 @@ test('init 查询窗口内变空的组仍保留 active 供随后归档', async (
   assert.deepEqual(local.data['tabg:g:1'], snapshot);
   await archiveGroup(group.id);
 
-  const archives = Object.keys(local.data).filter(key => key.startsWith('tabg:a:1:'));
-  assert.equal(archives.length, 1);
+  assert.deepEqual(onlyArchive(local, group.id).tabs, snapshot.tabs);
 });
 
 test('缓存回填不覆盖组对象查询期间到达的新状态', async () => {
@@ -209,7 +231,123 @@ test('缓存回填不覆盖组对象查询期间到达的新状态', async () =>
   assert.equal(local.data['tabg:g:1'].title, '新组名');
 });
 
+test('启动读取 active 期间改名换色，本次对账和随后备份都使用新组信息', async () => {
+  const local = createStorage({ 'tabg:g:1': snapshot });
+  const updated = { ...group, title: '新组名', color: 'red' };
+  const tab = { id: 2, groupId: group.id, ...snapshot.tabs[0] };
+  const get = local.get;
+  local.get = async keys => {
+    const values = await get(keys);
+    // 批量读取 active 时，全组查询已经返回旧对象；改名和换色的事件依次到达
+    if (Array.isArray(keys)) {
+      noteGroupObject({ ...group, title: updated.title });
+      noteGroupObject(updated);
+    }
+    return values;
+  };
+  globalThis.chrome = {
+    storage: { local },
+    tabs: { async query() { return [tab]; } },
+    tabGroups: { async query() { return [group]; } },
+  };
+
+  await initBackupAllGroups([tab], true);
+  const active = local.data['tabg:g:1'];
+  assert.equal(active.title, updated.title);
+  assert.equal(active.color, updated.color);
+
+  await backupGroup(group.id);
+  assert.deepEqual(local.writes, [['tabg:g:1'], ['tabg:meta']]);
+  forgetGroupObject(group.id);
+  await archiveGroup(group.id);
+  const archived = onlyArchive(local, group.id);
+  assert.equal(archived.title, updated.title);
+  assert.equal(archived.color, updated.color);
+});
+
+test('冷启动查询期间删除并复用组 id，旧组先归档，新组随后单独备份', async () => {
+  const local = createStorage({ 'tabg:g:1': snapshot });
+  const oldTab = { id: 2, groupId: group.id, url: 'https://old.example/', title: '查询时的旧标签' };
+  const newTab = { id: 3, groupId: group.id, url: 'https://new.example/', title: '新标签' };
+  const reused = { ...group, title: '复用 id 的新组', color: 'green' };
+  forgetGroupObject(group.id);
+  globalThis.chrome = {
+    storage: { local },
+    tabs: { async query() { return [newTab]; } },
+    tabGroups: {
+      async query() {
+        await Promise.resolve();
+        forgetGroupObject(group.id);
+        noteGroupObject(reused);
+        return [group];
+      },
+    },
+  };
+
+  await initBackupAllGroups([oldTab], true);
+  assert.deepEqual(local.data['tabg:g:1'], snapshot);
+  await archiveGroup(group.id);
+  const { deletedAt, ...archived } = onlyArchive(local, group.id);
+  assert.ok(Number.isFinite(Date.parse(deletedAt)));
+  assert.deepEqual(archived, snapshot);
+
+  await backupGroup(group.id);
+  const active = local.data['tabg:g:1'];
+  assert.equal(active.title, reused.title);
+  assert.equal(active.color, reused.color);
+  assert.deepEqual(active.tabs, [{ url: newTab.url, title: newTab.title }]);
+});
+
+test('启动等待节流时间戳时删除旧组并复用编号，保留旧归档内容', async () => {
+  const local = createStorage({ 'tabg:g:1': snapshot });
+  const reused = { ...group, title: '新组' };
+  const get = local.get;
+  local.get = async keys => {
+    if (keys === 'tabg:meta') {
+      forgetGroupObject(group.id);
+      noteGroupObject(reused);
+    }
+    return get(keys);
+  };
+  globalThis.chrome = { storage: { local }, tabGroups: { async query() { return [reused]; } } };
+  await initBackupAllGroups([{ groupId: 1, url: 'https://example.com/old' }]);
+  assert.deepEqual(local.data['tabg:g:1'], snapshot);
+});
+
+test('整组标签尚无网址时，单组备份与启动对账都保留已有的有效快照', async () => {
+  const local = createStorage({ 'tabg:g:1': snapshot });
+  const tabs = [{ groupId: group.id, index: 0 }];
+  globalThis.chrome = {
+    storage: { local }, tabs: { async query() { return tabs; } },
+    tabGroups: { async query() { return [group]; }, async get() { assert.fail('无可保存的网址时不应读取组对象'); } },
+  };
+  forgetGroupObject(group.id);
+  await backupGroup(group.id);
+  await initBackupAllGroups(tabs, true);
+  assert.deepEqual(local.data['tabg:g:1'], snapshot);
+});
+
+test('系统时钟回拨后仍执行启动对账', async () => {
+  const local = createStorage({ 'tabg:meta': { lastInitAt: Date.now() + 86_400_000 }, 'tabg:g:1': snapshot });
+  globalThis.chrome = { storage: { local }, tabGroups: { async query() { return []; } } };
+  await initBackupAllGroups([]);
+  assert.deepEqual(onlyArchive(local, 1).tabs, snapshot.tabs);
+});
+
 for (const hasGetKeys of [true, false]) {
+  test(`编号格式异常的键不会覆盖正常编号的归档（getKeys=${hasGetKeys}）`, async () => {
+    const local = createStorage({ 'tabg:g:1': snapshot, 'tabg:g:01': { ...snapshot, title: '异常键' } });
+    if (!hasGetKeys) delete local.getKeys;
+    globalThis.chrome = { storage: { local }, tabGroups: { async query() { return []; } } };
+    await initBackupAllGroups([], true);
+    assert.equal(onlyArchive(local, 1).title, snapshot.title);
+    assert.equal(local.data['tabg:g:01'].title, '异常键');
+    assert.equal((await readBackups(false)).active, 0);
+    assert.equal((await readBackups(true)).entries['tabg:g:01'].title, '异常键');
+    await initBackupAllGroups([], true);
+    assert.equal(onlyArchive(local, 1).title, snapshot.title);
+  });
+
   test(`init 只写内容变化的存活组（getKeys=${hasGetKeys}）`, async () => {
     const changedBefore = { ...snapshot, id: 2, title: '旧组名' };
     const local = createStorage({
@@ -299,9 +437,7 @@ for (const hasGetKeys of [true, false]) {
     assert.equal(local.data.tabGroupBackup, undefined);
     assert.equal(local.data['tabg:g:1'], undefined);
     assert.deepEqual(local.data['tabg:g:2'], v2Live);
-    const archives = Object.entries(local.data).filter(([key]) => key.startsWith('tabg:a:1:'));
-    assert.equal(archives.length, 1);
-    assert.equal(archives[0][1].title, 'v2 死组');
+    assert.equal(onlyArchive(local, 1).title, 'v2 死组');
     assert.ok(!local.writes.flat().includes('tabg:g:2'));
   });
 }
@@ -323,11 +459,8 @@ test('v1 单 key 数据成功迁移，存活与历史快照按 v2 归档', async
 
   assert.equal(local.data.tabGroupBackup, undefined);
   assert.equal(local.data['tabg:g:1'], undefined);
-  const activeArchives = Object.keys(local.data).filter(key => key.startsWith('tabg:a:1:'));
-  const oldArchives = Object.keys(local.data).filter(key => key.startsWith('tabg:a:2:'));
-  assert.equal(activeArchives.length, 1);
-  assert.equal(oldArchives.length, 1);
-  assert.equal(local.data[oldArchives[0]].deletedAt, deletedAt);
+  assert.deepEqual(onlyArchive(local, 1).tabs, snapshot.tabs);
+  assert.equal(onlyArchive(local, 2).deletedAt, deletedAt);
 });
 
 test('v1 归档迁移保留 Unix 纪元删除时间', async () => {
@@ -363,9 +496,7 @@ test('v1 迁移时存活空组也保留 active 供随后归档', async () => {
   assert.equal(local.data.tabGroupBackup, undefined);
   assert.deepEqual(local.data['tabg:g:1'], snapshot);
   await archiveGroup(group.id);
-  const archives = Object.keys(local.data).filter(key => key.startsWith('tabg:a:1:'));
-  assert.equal(archives.length, 1);
-  assert.deepEqual(local.data[archives[0]].tabs, snapshot.tabs);
+  assert.deepEqual(onlyArchive(local, group.id).tabs, snapshot.tabs);
 });
 
 test('v1 迁移时内容变化的存活组仍写入当前拍照时间', async () => {
