@@ -43,6 +43,6 @@ Service Worker 调试求值不能动态 `import()`
 
 ## 外部代理切换实测
 
-并发外部切换场景必须用外部命令直接打开目标扩展 URL，不要先 `newPage()` 创建 `about:blank`，否则页面可能在导航前被重复标签合并
+并发外部切换场景必须用外部命令直接打开目标扩展 URL，不要先 `newPage()` 创建 `about:blank`，否则页面可能在导航前被重复标签合并。在 macOS 上，直接调用 Chrome 可执行文件，传入已启动测试实例的 `--user-data-dir=<独立 profile 的绝对路径>` 和目标 URL；不要用未指定 profile 的命令，以免打开用户自己的浏览器
 
 实测至少区分相同模式跳过写入、其他扩展控制时拒绝、成功后自动关页和失败后保留页面；不得把 `switch.html` 加入 `web_accessible_resources`
