@@ -8,6 +8,14 @@
 
 只有取消正在审核的版本等会改变既有商店状态的操作需要单独确认。上传、保存或送审失败、状态不明时先停下核实，不自动收尾
 
+## 命令行发布配置
+
+`scripts/chrome-web-store.mjs` 是仓库自带的 Node.js 脚本，不需要安装 npm 发布工具。使用 Node.js 22 或更高版本，以及 `PATH` 中的 `gcloud`，也可把 Google Cloud CLI 解压到主工作树的 `tools/google-cloud-sdk/`
+
+只在主工作树的 `.env` 填写 `CWS_PUBLISHER_ID`、`CWS_EXTENSION_ID`、`CWS_PROJECT_ID` 和 `CWS_SERVICE_ACCOUNT`，文件权限设为 `600`。这些是标识，不是私钥；其他工作树共用这份配置，但只打包当前工作树的代码
+
+首次使用时，按[商店服务账号指南](https://developer.chrome.com/docs/webstore/service-accounts)绑定账号，在专用项目启用 Chrome Web Store API 和 IAM Service Account Credentials API，给操作者授予该服务账号的 Token Creator 角色。在 `CLOUDSDK_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/cws-publisher/private-browser-toolkit"` 下运行 `gcloud auth application-default login --impersonate-service-account=<服务账号邮箱> --scopes=https://www.googleapis.com/auth/chromewebstore --disable-quota-project`。此后命令按需取得短期令牌，不需要导出私钥或打开 Chrome
+
 ## 完整流程
 
 ### 1. 基线
@@ -16,15 +24,15 @@
 
 确认基线后 `git fetch`、更新 `main` 并建 `release/<version>` 分支
 
-检查 `http://127.0.0.1:9222/json/version`，未启动就执行 `chrome cdp`，再用 `playwright.chromium.connectOverCDP('http://127.0.0.1:9222', { noDefaults: true })` 连接，沿用发布浏览器现有的下载等设置。缺少 Playwright 时装到 `/tmp`，不全局安装
+先运行 `yarn store:status` 核对线上版本和已送审版本。API 不返回未送审草稿的版本；如果有单独上传过的草稿，去后台「文件包」核对
 
-复用一个商店页面，先核对发布者、扩展 ID、线上／草稿版本和审核状态
+仅需改商品资料、权限声明或核实后台状态时才打开网页。检查 `http://127.0.0.1:9222/json/version`，未启动就执行 `chrome cdp`，再用 `playwright.chromium.connectOverCDP('http://127.0.0.1:9222', { noDefaults: true })` 连接。缺少 Playwright 时装到 `/tmp`，不全局安装。复用一个页面并核对发布者和扩展 ID
 
 ### 2. 评审与本地包
 
 代码完成后先执行 `/code-review` 并处理发现，需要简化时再执行 `/simplify`；评审未结束不得上传
 
-升 `manifest.json` 的 `version`，确保高于线上和草稿版本，运行 `yarn test && yarn release`，核对 zip 版本与文件清单
+升 `manifest.json` 的 `version`，确保高于线上和草稿版本。先运行 `yarn test`，再用 `node scripts/package-extension.mjs zip` 打包刚通过测试的 `dist/`，核对 ZIP 版本与文件清单。独立运行 `yarn release` 时仍会先重新构建；打包和校验分别使用系统的 `zip` 和 `unzip`
 
 代理、组生命周期或无痕变更还要按[测试文档](testing.md)在隔离 Chrome profile 实测，不操作用户自己的代理设置或备份数据
 
@@ -32,7 +40,9 @@
 
 ### 3. 商店送审
 
-打开 devconsole 上传页：
+只更新代码时，在包含发布提交的干净工作树执行 `yarn store:submit <版本号>`。命令先测试，再打包、校验并上传刚通过测试的 `dist/`，确认上传成功后才送审；已有版本待审时会停下来，不会撤回。成功后直接进入第 4 步，不要再走网页上传
+
+如需在新包上传后更新商品说明、截图或隐私声明，改走以下网页流程。打开 devconsole 上传页：
 
 https://chrome.google.com/u/1/webstore/devconsole/27bf1380-10a4-4673-a253-0da100617e74/gnpaolggdcljndfmfealhoefoopkghch/edit/package
 
@@ -44,7 +54,7 @@ https://chrome.google.com/u/1/webstore/devconsole/27bf1380-10a4-4673-a253-0da100
 
 ### 4. 确认结果
 
-重新读取「状态」和「文件包」，确认新草稿版本与“待审核”状态。送审成功不等于已经上线
+命令行送审时，先核对命令最后打印的状态，分别确认待审核版本和线上版本。如果还没显示本次版本，再运行 `yarn store:status` 刷新；网页送审则重新读取「状态」和「文件包」。送审成功不等于已经上线
 
 ### 5. 代码收尾
 

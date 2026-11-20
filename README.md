@@ -83,13 +83,13 @@ yarn dev
 
 测试使用 Node 内置 test runner 和轻量 Chrome API mock，不需要额外测试依赖，覆盖代理模式与图标、外部扩展控制、分组生命周期、无痕隔离、迁移失败和标签操作边界；真实代理设置、窗口和标签事件仍应在 Chrome 中回归
 
-### 发布打包
+### 打包与商店发布
 
-```bash
-yarn release
-```
+- `yarn release`：重新构建并替换本地 `extension.zip`，不上传
+- `yarn store:status`：查询商店的线上版本和审核状态
+- `yarn store:submit <版本号>`：从当前工作树测试、打包并送审，通过审核后自动发布
 
-该命令会重新构建并删除旧 zip，避免已删除的文件残留在新发布包中
+后两条命令需要本机发布授权，不需要打开 Chrome。配置方法和完整发版步骤见[发布流程](docs/release.md)
 
 ## 项目结构
 
@@ -108,6 +108,7 @@ yarn release
 ├── icon/                  # 品牌图标与当前代理状态图标
 ├── design/icon-states/    # 可替换的代理图标候选，不进入发布包
 ├── docs/                  # 按需阅读的架构、实测与发布文档
+├── scripts/               # 本地打包、商店查询和送审脚本，不进入扩展包
 ├── tests/                 # Node 内置 test runner 回归测试
 └── worker/                # Service Worker 脚本与共享模块
     ├── queue.ts           # 串行队列实现

@@ -1,13 +1,16 @@
 {
   "private": true,
   "type": "module",
+  "chromeWebStoreId": "gnpaolggdcljndfmfealhoefoopkghch",
   "scripts": {
     "dev": "tsc -w",
     "build": "npm run clean && npm run copy && tsc",
     "clean": "rm -rf dist",
-    "copy": "mkdir -p dist && cp -r manifest.json icon options.html popup.html switch.html ui.css dist",
+    "copy": "node scripts/package-extension.mjs copy",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "release": "npm run build && rm -f extension.zip && cd dist && zip -r ../extension.zip ."
+    "release": "npm run build && node scripts/package-extension.mjs zip",
+    "store:status": "node scripts/chrome-web-store.mjs status",
+    "store:submit": "node scripts/chrome-web-store.mjs submit"
   },
   "devDependencies": {
     "@types/chrome": "^0.1.39",
