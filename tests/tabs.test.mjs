@@ -26,9 +26,15 @@ const duplicateCases = [
     duplicates: [candidates.pinned, candidates.otherGroup, candidates.cross],
     expectedCalls: [['focus', 2], ['activate', 3], ['remove', 999]],
   },
+  {
+    name: '候选都已固定或属于其他组时保留重复标签',
+    duplicates: [candidates.pinned, candidates.otherGroup],
+    expectedCalls: [],
+    removed: false,
+  },
 ];
 
-for (const { name, duplicates, expectedCalls } of duplicateCases) {
+for (const { name, duplicates, expectedCalls, removed = true } of duplicateCases) {
   test(name, async () => {
     const calls = [];
     const newTab = { id: 999, groupId: 1, windowId: 1, pinned: false };
@@ -45,7 +51,7 @@ for (const { name, duplicates, expectedCalls } of duplicateCases) {
       windows: { async update(id) { calls.push(['focus', id]); } },
     };
 
-    assert.equal(await checkDuplicate(newTab.id), true);
+    assert.equal(await checkDuplicate(newTab.id), removed);
     assert.deepEqual(calls, expectedCalls);
   });
 }

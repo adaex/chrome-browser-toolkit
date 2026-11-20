@@ -4,7 +4,7 @@ import test from 'node:test';
 import { createEventRegistry, createStorage, flush } from './helpers.mjs';
 
 test('无痕 split 进程不注册业务监听，也不启动查询、代理操作或备份', async () => {
-  const { listeners, event } = createEventRegistry();
+  const { listeners, event, tabEvents, groupEvents } = createEventRegistry();
   const local = createStorage();
   let tabQueries = 0;
   let proxyReads = 0;
@@ -28,15 +28,9 @@ test('无痕 split 进程不注册业务监听，也不启动查询、代理操�
         tabQueries++;
         return [];
       },
-      onCreated: event('created'),
-      onUpdated: event('updated'),
-      onRemoved: event('removed'),
-      onDetached: event('detached'),
+      ...tabEvents,
     },
-    tabGroups: {
-      onUpdated: event('groupUpdated'),
-      onRemoved: event('groupRemoved'),
-    },
+    tabGroups: groupEvents,
     storage: { local },
   };
 

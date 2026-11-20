@@ -1,12 +1,10 @@
 import { archiveGroup, backupGroup, initBackupAllGroups } from './backup.js';
 import {
-  consumeColdMiss,
   forgetGroupObject,
   forgetTab,
   formerGroupOf,
   noteGroup,
   noteGroupObject,
-  rebuildGroupCache,
   resolveGroupObject,
 } from './groupCache.js';
 import { catchError, Queue, queue } from './queue.js';
@@ -14,19 +12,71 @@ import { applyProxyWrite, PROXY_MESSAGE, syncProxyIndicator } from './proxy.js';
 import { loadFeatureSettings } from './settings.js';
 import { checkDuplicate, effectiveUrl, isProxySwitchUrl, toFullscreenWindow } from './tabs.js';
 
-const proxyWriteQueue = new Queue(1);
+const proxyWriteQueue = new Queue();
 
 function startNormalMode() {
-  // 同组只保留一个待执行备份；执行期间又来了事件，可再排一个尾随备份读取最新状态
-  const pendingGroupBackups = new Set<number>();
-  function scheduleBackup(groupId: number | undefined) {
-    if (!groupId || groupId <= 0 || pendingGroupBackups.has(groupId)) return;
-    pendingGroupBackups.add(groupId);
+  // 去重查询读取当时的标签，不依赖事件里的网址；查询发出前，同一标签只排一次
+  type TabCheck = { tabId: number; newWindowId?: number; merged: boolean };
+  const pendingTabChecks = new Map<number, TabCheck>();
+  const changedTabs = new Set<number>(); // 只跟踪当前查询期间导航或关闭的标签
+  const isCurrent = (id: number) => !changedTabs.has(id);
+  let checking: TabCheck | undefined;
+  function scheduleTabCheck(tabId: number, newWindowId?: number) {
+    const pending = pendingTabChecks.get(tabId);
+    if (pending) {
+      pending.merged = true;
+      pending.newWindowId ??= newWindowId;
+      return;
+    }
+    const check: TabCheck = { tabId, newWindowId, merged: false };
+    pendingTabChecks.set(tabId, check);
     queue.run(async () => {
-      // 让同一轮同步事件先完成合并，例如 complete 与 groupId 同时变化
-      await Promise.resolve();
-      pendingGroupBackups.delete(groupId);
-      await backupGroup(groupId);
+      if (pendingTabChecks.get(tabId) !== check) return;
+      try {
+        const settings = await loadFeatureSettings();
+        if (pendingTabChecks.get(tabId) !== check) return;
+        pendingTabChecks.delete(tabId);
+        checking = check;
+        const removed = settings.deduplicate && await checkDuplicate(tabId, isCurrent);
+        if (!isCurrent(tabId) || removed || !settings.fullscreen || check.newWindowId === undefined) return;
+        check.merged = false;
+        await toFullscreenWindow(tabId, check.newWindowId, () => {
+          if (!isCurrent(tabId)) return false;
+          check.newWindowId = undefined; // 本次已决定移动，之后的导航只需去重
+          return true;
+        });
+      } catch (error) {
+        // 读取失败时，给已合并的事件一次机会；关闭或导航后的旧任务不重排
+        const pending = pendingTabChecks.get(tabId) === check;
+        if (pending) pendingTabChecks.delete(tabId);
+        if (check.merged && (pending || (checking === check && isCurrent(tabId)))) {
+          scheduleTabCheck(tabId, check.newWindowId);
+        }
+        throw error;
+      } finally {
+        checking = undefined;
+        changedTabs.clear();
+      }
+    });
+  }
+
+  // 同组只保留一个待执行备份；执行期间又来了事件，可再排一个尾随备份读取最新状态
+  const groupBackups = new Map<number, { pending: boolean }>();
+  function scheduleBackup(groupId: number | undefined) {
+    if (groupId === undefined || groupId < 0) return;
+    const batch = groupBackups.get(groupId) ?? { pending: false };
+    if (batch.pending) return;
+    batch.pending = true;
+    groupBackups.set(groupId, batch);
+    const isCurrent = () => groupBackups.get(groupId) === batch;
+    queue.run(async () => {
+      if (!isCurrent()) return;
+      batch.pending = false;
+      try {
+        await backupGroup(groupId, isCurrent);
+      } finally {
+        if (!batch.pending && isCurrent()) groupBackups.delete(groupId);
+      }
     });
   }
 
@@ -50,8 +100,9 @@ function startNormalMode() {
   chrome.proxy.settings.onChange.addListener(refreshProxyIndicator);
   refreshProxyIndicator();
 
-  // 顶层立即查询并重建；失败由启动队列统一记录并中止，不会当成空标签继续对账
-  const initialTabsReady = rebuildGroupCache();
+  // 启动对账占据队首，从第一次查询起记录组的变动
+  const startup = initBackupAllGroups();
+  queue.run(() => startup);
 
   chrome.tabs.onCreated.addListener(tab => {
     const tabId = tab.id;
@@ -61,27 +112,18 @@ function startNormalMode() {
     // 一次性代理切换页不参与标签管理，避免失败后的同 URL 重试被合并或移动
     if (isProxySwitchUrl(effectiveUrl(tab))) return;
 
-    queue.run(async () => {
-      const settings = await loadFeatureSettings();
-
-      // 先去重：命中重复时新标签会被关掉，全屏吸附就不必再做，也避免焦点在两个窗口间来回跳
-      const removed = settings.deduplicate ? await checkDuplicate(tabId) : false;
-
-      // 从外部打开一个全新普通的单标签窗口，且新标签还在，才把这个 tab 移到全屏窗口
-      if (!removed && settings.fullscreen && !tab.openerTabId && tab.index === 0) {
-        await toFullscreenWindow(tabId, tab.windowId);
-      }
-    });
+    scheduleTabCheck(tabId, !tab.openerTabId && tab.index === 0 ? tab.windowId : undefined);
   });
 
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    const prevGroupId = formerGroupOf(tabId);
+    const groupChanged = changeInfo.groupId != null;
+    const prevGroupId = groupChanged ? formerGroupOf(tabId) : undefined;
     noteGroup(tabId, tab.groupId);
 
-    if (changeInfo.url && !isProxySwitchUrl(changeInfo.url)) {
-      queue.run(async () => {
-        if ((await loadFeatureSettings()).deduplicate) await checkDuplicate(tabId);
-      });
+    if (changeInfo.url) {
+      if (checking) changedTabs.add(tabId);
+      if (isProxySwitchUrl(changeInfo.url)) pendingTabChecks.delete(tabId);
+      else scheduleTabCheck(tabId, checking?.tabId === tabId ? checking.newWindowId : undefined);
     }
 
     // complete 后拍下当前标题；之后 SPA 等场景再改标题时补拍
@@ -90,13 +132,15 @@ function startNormalMode() {
     }
 
     // 入组、离组、跨组移动：新组要拍，旧组少了标签也要拍（独立分支，不与上面互斥）
-    if (changeInfo.groupId != null) {
-      if (prevGroupId && prevGroupId > 0 && prevGroupId !== tab.groupId) scheduleBackup(prevGroupId);
+    if (groupChanged) {
+      if (prevGroupId !== tab.groupId) scheduleBackup(prevGroupId);
       scheduleBackup(tab.groupId);
     }
   });
 
   chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    pendingTabChecks.delete(tabId);
+    if (checking) changedTabs.add(tabId);
     const groupId = formerGroupOf(tabId);
     forgetTab(tabId);
 
@@ -104,10 +148,10 @@ function startNormalMode() {
     if (!removeInfo.isWindowClosing) scheduleBackup(groupId);
   });
 
-  chrome.tabs.onDetached.addListener(tabId => {
-    // 跨窗口拖出：标签会被自动移出原组，onDetached 本身不带 groupId，用缓存定位旧组
-    scheduleBackup(formerGroupOf(tabId));
-  });
+  // 同窗拖动会改变组内顺序，跨窗拖出会改变原组成员；两种事件都不带 groupId
+  const backupAfterMove = (tabId: number) => scheduleBackup(formerGroupOf(tabId));
+  chrome.tabs.onMoved.addListener(backupAfterMove);
+  chrome.tabs.onDetached.addListener(backupAfterMove);
 
   chrome.tabGroups.onUpdated.addListener(group => {
     const previous = resolveGroupObject(group.id);
@@ -121,20 +165,9 @@ function startNormalMode() {
 
   chrome.tabGroups.onRemoved.addListener(group => {
     // 组被删除时归档快照，误删可从归档找回
+    groupBackups.delete(group.id);
     forgetGroupObject(group.id);
     queue.run(() => archiveGroup(group.id));
-  });
-
-  queue.run(async () => {
-    const initialTabs = await initialTabsReady;
-
-    // 有归属事件在缓存就绪前 miss，说明旧组可能没拍到：查最新状态并无视节流强刷一次
-    if (consumeColdMiss()) {
-      const latestTabs = await rebuildGroupCache();
-      await initBackupAllGroups(latestTabs, true);
-    } else {
-      await initBackupAllGroups(initialTabs, false);
-    }
   });
 }
 

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEventRegistry, createProxyIndicatorMock, createStorage, flush, snapshot } from './helpers.mjs';
+import { createEventRegistry, createProxyIndicatorMock, createStorage, flush, onlyArchive, snapshot } from './helpers.mjs';
 
 test('取消分组与主动清空都保留最后有效归档', async () => {
-  const { listeners, event } = createEventRegistry();
+  const { listeners, tabEvents, groupEvents } = createEventRegistry();
   const tab1 = { id: 101, groupId: 1, windowId: 1, index: 0, url: 'https://example.com/1', title: '一' };
   const tab2 = { id: 102, groupId: 2, windowId: 1, index: 1, url: 'https://example.com/2', title: '二' };
   const tabsByGroup = new Map([[1, [tab1]], [2, [tab2]]]);
@@ -19,15 +19,9 @@ test('取消分组与主动清空都保留最后有效归档', async () => {
       async query(filter) {
         return filter.groupId ? (tabsByGroup.get(filter.groupId) ?? []) : [tab1, tab2];
       },
-      onCreated: event('created'),
-      onUpdated: event('updated'),
-      onRemoved: event('removed'),
-      onDetached: event('detached'),
+      ...tabEvents,
     },
-    tabGroups: {
-      onUpdated: event('groupUpdated'),
-      onRemoved: event('groupRemoved'),
-    },
+    tabGroups: groupEvents,
     storage: { local },
   };
 
@@ -49,8 +43,6 @@ test('取消分组与主动清空都保留最后有效归档', async () => {
     await flush();
 
     assert.equal(local.data[`tabg:g:${groupId}`], undefined);
-    const archives = Object.keys(local.data).filter(key => key.startsWith(`tabg:a:${groupId}:`));
-    assert.equal(archives.length, 1);
-    assert.deepEqual(local.data[archives[0]].tabs, snapshot.tabs);
+    assert.deepEqual(onlyArchive(local, groupId).tabs, snapshot.tabs);
   }
 });

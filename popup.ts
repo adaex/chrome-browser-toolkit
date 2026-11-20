@@ -13,12 +13,14 @@ const socksEndpoint = document.querySelector<HTMLElement>('#socks-endpoint')!;
 
 let busy = true;
 let blocked = false;
+let currentStatus: ProxyStatus | undefined;
 
 function updateDisabled() {
   for (const input of modeInputs) input.disabled = busy || blocked;
 }
 
 function render(status: ProxyStatus) {
+  currentStatus = status;
   blocked = status.controlledByOther;
   socksEndpoint.textContent = `${LOCAL_PROXY_HOST}:${status.port}`;
 
@@ -30,6 +32,8 @@ function render(status: ProxyStatus) {
 
   if (status.controlledByOther) {
     showStatus(statusText,'代理由其他扩展控制，请先停用它', true);
+  } else if (status.portToApply !== undefined) {
+    showStatus(statusText, `点击「本机 SOCKS5」可改用已保存的端口 ${status.portToApply}`);
   } else if (status.mode === 'other') {
     showStatus(statusText,'当前是其他代理模式，选择一项即可替换');
   } else {
@@ -54,9 +58,10 @@ async function refresh(errorMessage?: string) {
 }
 
 for (const input of modeInputs) {
-  input.addEventListener('change', async () => {
+  input.addEventListener('click', async () => {
     if (!input.checked || busy || blocked) return;
     const mode: ProxyMode = input.value === 'socks5' ? 'socks5' : 'direct';
+    if (currentStatus?.mode === mode && currentStatus.portToApply === undefined) return;
     busy = true;
     updateDisabled();
     showStatus(statusText,'正在切换…');

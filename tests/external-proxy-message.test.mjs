@@ -5,7 +5,7 @@ import { PROXY_MESSAGE } from '../dist/worker/proxy.js';
 import { createEventRegistry, createProxyIndicatorMock, createStorage, flush } from './helpers.mjs';
 
 test('外部代理消息在普通后台串行执行，最后一条指令决定最终模式', async () => {
-  const { event } = createEventRegistry();
+  const { tabEvents, groupEvents } = createEventRegistry();
   const local = createStorage({ 'tabg:meta': { lastInitAt: Date.now() } });
   const sets = [];
   let value = { mode: 'direct' };
@@ -29,17 +29,8 @@ test('外部代理消息在普通后台串行执行，最后一条指令决定�
         },
       },
     },
-    tabs: {
-      async query() { return []; },
-      onCreated: event('created'),
-      onUpdated: event('updated'),
-      onRemoved: event('removed'),
-      onDetached: event('detached'),
-    },
-    tabGroups: {
-      onUpdated: event('groupUpdated'),
-      onRemoved: event('groupRemoved'),
-    },
+    tabs: { ...tabEvents, async query() { return []; } },
+    tabGroups: groupEvents,
     storage: { local },
   };
 

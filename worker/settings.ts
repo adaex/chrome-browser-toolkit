@@ -3,18 +3,23 @@ export interface FeatureSettings {
   fullscreen: boolean;
 }
 
-const SETTINGS_KEY = 'featureSettings';
+const FEATURE_KEYS = {
+  deduplicate: 'featureSettings.deduplicate',
+  fullscreen: 'featureSettings.fullscreen',
+};
+const SETTINGS_KEYS = ['featureSettings', ...Object.values(FEATURE_KEYS)];
 
-// 默认开启，保持升级前的行为；每次任务直接读存储，不增加 SW 设置缓存和同步状态
+// 每个开关单独保存；没改过的沿用旧对象里的值，只有显式 false 才关闭
 export async function loadFeatureSettings(): Promise<FeatureSettings> {
-  const result = await chrome.storage.local.get(SETTINGS_KEY);
-  const value = result[SETTINGS_KEY] as Partial<FeatureSettings> | null | undefined;
-  return {
-    deduplicate: value?.deduplicate !== false,
-    fullscreen: value?.fullscreen !== false,
-  };
+  const stored = await chrome.storage.local.get(SETTINGS_KEYS);
+  const legacy = stored.featureSettings as Partial<FeatureSettings> | null | undefined;
+  function read(feature: keyof FeatureSettings) {
+    const value = stored[FEATURE_KEYS[feature]];
+    return typeof value === 'boolean' ? value : legacy?.[feature] !== false;
+  }
+  return { deduplicate: read('deduplicate'), fullscreen: read('fullscreen') };
 }
 
-export function saveFeatureSettings(settings: FeatureSettings): Promise<void> {
-  return chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+export function saveFeatureSetting(feature: keyof FeatureSettings, enabled: boolean): Promise<void> {
+  return chrome.storage.local.set({ [FEATURE_KEYS[feature]]: enabled });
 }

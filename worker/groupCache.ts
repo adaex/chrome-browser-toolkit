@@ -54,22 +54,44 @@ export function consumeColdMiss(): boolean {
 
 // 组对象缓存：热路径 backupGroup(number) 省一次 tabGroups.get，miss 读取后也会回填。
 // 只用于读取组名和颜色，不参与空组判断；onUpdated 或下次 init 会刷新
-const groupObjectCache = new Map<number, chrome.tabGroups.TabGroup>();
+type TabGroup = chrome.tabGroups.TabGroup;
+const groupObjectCache = new Map<number, TabGroup>();
 
-export function noteGroupObject(group: chrome.tabGroups.TabGroup) {
-  groupObjectCache.set(group.id, group);
+// 对账期间只记哪些组有过更新或删除；最新组对象仍只存一份
+let changesDuringInit: Map<number, 'updated' | 'removed'> | undefined;
+
+export async function trackGroupObjectChanges(reconcile: () => Promise<void>) {
+  changesDuringInit = new Map();
+  try {
+    await reconcile();
+  } finally {
+    changesDuringInit = undefined;
+  }
 }
 
-// 以实时组列表同步缓存：预热存活组，并清掉漏发 onRemoved 的旧对象
-export function syncGroupObjects(groups: chrome.tabGroups.TabGroup[]) {
-  const liveIds = new Set(groups.map(group => group.id));
+export function noteGroupObject(group: TabGroup) {
+  groupObjectCache.set(group.id, group);
+  if (changesDuringInit && !changesDuringInit.has(group.id)) changesDuringInit.set(group.id, 'updated');
+}
+
+// 预热存活组，清掉漏发 onRemoved 的旧对象；缓存和启动快照都采用查询期间的新事件
+export function syncGroupObjects(groups: TabGroup[], liveIds: Set<number>) {
   for (const groupId of groupObjectCache.keys()) {
-    if (!liveIds.has(groupId)) groupObjectCache.delete(groupId);
+    if (!liveIds.has(groupId) && !changesDuringInit?.has(groupId)) groupObjectCache.delete(groupId);
   }
-  for (const group of groups) noteGroupObject(group);
+  const snapshotGroups: TabGroup[] = [];
+  for (const group of groups) {
+    const change = changesDuringInit?.get(group.id);
+    // 即使编号已被新组复用，也不能为旧标签拍一份新组的快照
+    if (change === 'removed') continue;
+    if (!change) groupObjectCache.set(group.id, group);
+    snapshotGroups.push(change ? groupObjectCache.get(group.id)! : group);
+  }
+  return snapshotGroups;
 }
 
 export function forgetGroupObject(groupId: number) {
+  changesDuringInit?.set(groupId, 'removed');
   groupObjectCache.delete(groupId);
 }
 

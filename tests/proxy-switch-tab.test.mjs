@@ -4,7 +4,7 @@ import test from 'node:test';
 import { createEventRegistry, createProxyIndicatorMock, createStorage, flush } from './helpers.mjs';
 
 test('一次性代理切换页创建和 URL 更新时不执行去重或全屏吸附', async () => {
-  const { listeners, event } = createEventRegistry();
+  const { listeners, tabEvents, groupEvents } = createEventRegistry();
   const local = createStorage({ 'tabg:meta': { lastInitAt: Date.now() } });
   let tabQueries = 0;
   let windowReads = 0;
@@ -19,10 +19,7 @@ test('一次性代理切换页创建和 URL 更新时不执行去重或全屏吸
         tabQueries++;
         return [];
       },
-      onCreated: event('created'),
-      onUpdated: event('updated'),
-      onRemoved: event('removed'),
-      onDetached: event('detached'),
+      ...tabEvents,
     },
     windows: {
       async getAll() {
@@ -30,10 +27,7 @@ test('一次性代理切换页创建和 URL 更新时不执行去重或全屏吸
         return [];
       },
     },
-    tabGroups: {
-      onUpdated: event('groupUpdated'),
-      onRemoved: event('groupRemoved'),
-    },
+    tabGroups: groupEvents,
     storage: { local },
   };
 

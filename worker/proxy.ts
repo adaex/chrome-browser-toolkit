@@ -20,6 +20,7 @@ interface ProxyWriteResponse {
 export interface ProxyStatus {
   mode: ProxyModeState;
   port: number;
+  portToApply?: number;
   controlledByOther: boolean;
 }
 
@@ -129,7 +130,7 @@ async function persistProxyPort(port: number): Promise<void> {
   if (!isValidProxyPort(port)) throw new Error('Invalid proxy port');
 
   const current = await chrome.proxy.settings.get({});
-  const updateActiveProxy = current.levelOfControl !== 'controlled_by_other_extensions' && proxyModeOf(current.value) === 'socks5';
+  const updateActiveProxy = current.levelOfControl === 'controlled_by_this_extension' && proxyModeOf(current.value) === 'socks5';
   if (updateActiveProxy) await writeProxyMode('socks5', port);
   try {
     await chrome.storage.local.set({ [PROXY_PORT_KEY]: port });
@@ -163,8 +164,11 @@ export async function readProxyStatus(includeConfiguredPort = true): Promise<Pro
   ]);
   const mode = proxyModeOf(current.value);
   const activePort = current.value.rules?.singleProxy?.port;
+  const canApplyPort = includeConfiguredPort && mode === 'socks5' && activePort !== configuredPort &&
+    current.levelOfControl === 'controllable_by_this_extension';
   return {
     mode,
+    ...(canApplyPort ? { portToApply: configuredPort } : {}),
     controlledByOther: current.levelOfControl === 'controlled_by_other_extensions',
     port: mode === 'socks5' && typeof activePort === 'number' && isValidProxyPort(activePort)
       ? activePort

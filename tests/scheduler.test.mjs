@@ -4,7 +4,7 @@ import test from 'node:test';
 import { createEventRegistry, createProxyIndicatorMock, createStorage, flush, group, waitFor } from './helpers.mjs';
 
 test('备份按组合并、纯折叠不重写，功能开关无需重启即可生效', async () => {
-  const { listeners, event } = createEventRegistry();
+  const { listeners, tabEvents, groupEvents } = createEventRegistry();
   let tab = {
     id: 1,
     groupId: group.id,
@@ -23,16 +23,9 @@ test('备份按组合并、纯折叠不重写，功能开关无需重启即可�
         if (!filter.groupId) allTabQueries++;
         return [tab];
       },
-      onCreated: event('created'),
-      onUpdated: event('updated'),
-      onRemoved: event('removed'),
-      onDetached: event('detached'),
+      ...tabEvents,
     },
-    tabGroups: {
-      async get() { return group; },
-      onUpdated: event('groupUpdated'),
-      onRemoved: event('groupRemoved'),
-    },
+    tabGroups: { ...groupEvents, async get() { return group; } },
     storage: { local },
   };
 
