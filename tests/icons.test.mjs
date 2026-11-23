@@ -4,12 +4,12 @@ import test from 'node:test';
 
 const root = new URL('../', import.meta.url);
 
-test('弹窗与设置页的品牌图使用 SVG', async () => {
+test('弹窗与设置页提供代理状态 SVG 图标挂载点', async () => {
   const pages = ['popup.html', 'options.html'];
   const htmls = await Promise.all(pages.map(page => readFile(new URL(page, root), 'utf8')));
   for (const html of htmls) {
-    const sources = [...html.matchAll(/<img\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-    assert.deepEqual(sources, ['icon/icon.svg']);
+    const images = [...html.matchAll(/<img\b[^>]*>/g)].map(match => match[0]);
+    assert.deepEqual(images, ['<img id="proxy-status-icon" src="icon/icon.svg" alt="" hidden />']);
   }
 });
 

@@ -43,6 +43,16 @@ const ACTION_ICONS = {
   },
 } as const;
 
+const PAGE_ICONS: Record<ProxyModeState, string> = {
+  direct: 'icon/icon.svg',
+  socks5: 'icon/socks5.svg',
+  other: 'icon/other.svg',
+};
+
+export function pageIconForProxyMode(mode: ProxyModeState): string {
+  return PAGE_ICONS[mode];
+}
+
 export function isValidProxyPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
@@ -53,7 +63,7 @@ function assertRegularProxyContext() {
   }
 }
 
-function proxyModeOf(value: chrome.proxy.ProxyConfig): ProxyModeState {
+export function proxyModeOf(value: chrome.proxy.ProxyConfig): ProxyModeState {
   if (value.mode === 'direct') return 'direct';
   const proxy = value.rules?.singleProxy;
   if (
@@ -64,6 +74,12 @@ function proxyModeOf(value: chrome.proxy.ProxyConfig): ProxyModeState {
     return 'socks5';
   }
   return 'other';
+}
+
+export function proxyModeLabel(mode: ProxyModeState): string {
+  if (mode === 'direct') return '直连';
+  if (mode === 'socks5') return '本机 SOCKS5';
+  return '其他代理模式';
 }
 
 export async function loadProxyPort(): Promise<number> {
@@ -177,21 +193,28 @@ export async function readProxyStatus(includeConfiguredPort = true): Promise<Pro
 }
 
 let indicatorSyncVersion = 0;
+let indicatorWriteTail = Promise.resolve();
 
 export async function syncProxyIndicator(): Promise<void> {
   const syncVersion = ++indicatorSyncVersion;
   const status = await readProxyStatus(false);
   // 多次设置变化只让最后一次状态读取更新图标，避免慢请求回写旧状态
   if (syncVersion !== indicatorSyncVersion) return;
-  const mode = status.mode === 'direct'
-    ? '直连'
-    : status.mode === 'socks5'
-      ? `本机 SOCKS5 · ${LOCAL_PROXY_HOST}:${status.port}`
-      : '其他代理模式';
+  const label = proxyModeLabel(status.mode);
+  const mode = status.mode === 'socks5' ? `${label} · ${LOCAL_PROXY_HOST}:${status.port}` : label;
   const controller = status.controlledByOther ? ' · 由其他扩展控制' : '';
 
-  await Promise.all([
-    chrome.action.setIcon({ path: ACTION_ICONS[status.mode] }),
-    chrome.action.setTitle({ title: `Private Browser Toolkit\n当前：${mode}${controller}` }),
-  ]);
+  // 写入也按顺序执行；即使其中一项失败，也要等另一项结束后再写最新状态
+  const write = indicatorWriteTail.then(async () => {
+    if (syncVersion !== indicatorSyncVersion) return;
+    const results = await Promise.allSettled([
+      chrome.action.setIcon({ path: ACTION_ICONS[status.mode] }),
+      chrome.action.setTitle({ title: `Private Browser Toolkit\n当前：${mode}${controller}` }),
+    ]);
+    for (const result of results) {
+      if (result.status === 'rejected') throw result.reason;
+    }
+  });
+  indicatorWriteTail = write.catch(() => {});
+  await write;
 }

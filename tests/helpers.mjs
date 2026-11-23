@@ -1,5 +1,34 @@
 import assert from 'node:assert/strict';
 
+export const localSocks = (port = 7890) => ({
+  mode: 'fixed_servers',
+  rules: {
+    singleProxy: { scheme: 'socks5', host: '127.0.0.1', port },
+  },
+});
+
+export function proxyResult(value) {
+  return { value: structuredClone(value), levelOfControl: 'controlled_by_this_extension' };
+}
+
+export function createImage() {
+  let source = 'icon/icon.svg';
+  let assignments = 0;
+  return {
+    hidden: true,
+    alt: '',
+    get src() { return source; },
+    set src(value) {
+      source = value;
+      assignments++;
+    },
+    getAttribute(name) {
+      return name === 'src' ? source : null;
+    },
+    get assignments() { return assignments; },
+  };
+}
+
 export function onlyArchive(local, groupId) {
   const keys = Object.keys(local.data).filter(key => key.startsWith(`tabg:a:${groupId}:`));
   assert.equal(keys.length, 1, `标签组 ${groupId} 应只有一份归档`);
@@ -66,10 +95,7 @@ export function createProxyIndicatorMock() {
       settings: {
         onChange: { addListener() {} },
         async get() {
-          return {
-            value: { mode: 'direct' },
-            levelOfControl: 'controlled_by_this_extension',
-          };
+          return proxyResult({ mode: 'direct' });
         },
       },
     },

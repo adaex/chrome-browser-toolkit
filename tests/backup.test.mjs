@@ -6,9 +6,10 @@ import { forgetGroupObject, noteGroupObject } from '../dist/worker/groupCache.js
 import { createStorage, group, onlyArchive, snapshot } from './helpers.mjs';
 
 test('归档写入失败时保留旧 active 快照', async () => {
+  let failed = true;
   const local = createStorage(
     { 'tabg:meta': { lastInitAt: 0 }, 'tabg:g:1': snapshot },
-    { failSet: values => Object.keys(values).some(key => key.startsWith('tabg:a:')) },
+    { failSet: values => failed && Object.keys(values).some(key => key.startsWith('tabg:a:')) },
   );
   globalThis.chrome = {
     storage: { local },
@@ -18,6 +19,8 @@ test('归档写入失败时保留旧 active 快照', async () => {
   await assert.rejects(initBackupAllGroups([], false));
   assert.deepEqual(local.data['tabg:g:1'], snapshot);
   assert.equal(local.removals.length, 0);
+  failed = false;
+  await archiveGroup(group.id);
 });
 
 test('旧组归档失败期间保留快照，恢复后才允许同编号的新组写入', async () => {
@@ -34,6 +37,180 @@ test('旧组归档失败期间保留快照，恢复后才允许同编号的新�
   await backupGroup(11);
   assert.equal(onlyArchive(local, 11).title, snapshot.title);
   assert.equal(local.data['tabg:g:11'].title, '新组');
+});
+
+test('归档失败后重启也会先保留旧组，再写同编号的新组', async () => {
+  let failed = true;
+  const oldSnapshot = { ...snapshot, id: 21, title: '旧组' };
+  const local = createStorage(
+    { 'tabg:meta': { lastInitAt: Date.now() }, 'tabg:g:21': oldSnapshot },
+    { failSet: values => failed && Object.keys(values).some(key => key.startsWith('tabg:a:')) },
+  );
+  globalThis.chrome = { storage: { local } };
+  const beforeRestart = await import('../dist/worker/backup.js?pending-before-restart');
+  await assert.rejects(beforeRestart.archiveGroup(21));
+  assert.equal(local.data['tabg:p:21'], true);
+
+  failed = false;
+  const currentGroup = { ...group, id: 21, title: '新组' };
+  globalThis.chrome = { storage: { local }, tabGroups: { async query() { return [currentGroup]; } } };
+  const afterRestart = await import('../dist/worker/backup.js?pending-after-restart');
+  await afterRestart.initBackupAllGroups([
+    { groupId: 21, index: 0, url: 'https://new.example/', title: '新标签' },
+  ], false);
+
+  assert.equal(onlyArchive(local, 21).title, '旧组');
+  assert.equal(local.data['tabg:g:21'].title, '新组');
+  assert.equal(local.data['tabg:p:21'], undefined);
+});
+
+test('待归档标记落盘后才读取 active', async () => {
+  const local = createStorage({ 'tabg:g:31': { ...snapshot, id: 31 } });
+  const get = local.get;
+  const set = local.set;
+  const operations = [];
+  local.set = async values => {
+    operations.push('set:start');
+    await set(values);
+    operations.push('set:end');
+  };
+  local.get = async keys => {
+    operations.push('get');
+    return get(keys);
+  };
+  globalThis.chrome = { storage: { local } };
+
+  await archiveGroup(31);
+  assert.deepEqual(operations.slice(0, 3), ['set:start', 'set:end', 'get']);
+});
+
+test('单组备份恢复待归档标记时不全量读取归档', async () => {
+  const oldSnapshot = { ...snapshot, id: 41, title: '旧组' };
+  const local = createStorage({
+    'tabg:g:41': oldSnapshot,
+    'tabg:p:41': true,
+    'tabg:a:40:1700000000000:00000000-0000-4000-8000-000000000000': { title: '既有归档' },
+  });
+  local.getKeys = undefined;
+  const get = local.get;
+  const reads = [];
+  local.get = async keys => {
+    reads.push(keys);
+    return get(keys);
+  };
+  const currentGroup = { ...group, id: 41, title: '新组' };
+  globalThis.chrome = {
+    storage: { local },
+    tabs: { async query() { return [{ groupId: 41, index: 0, url: 'https://new.example/', title: '新标签' }]; } },
+    tabGroups: { async get() { return currentGroup; } },
+  };
+  const backup = await import('../dist/worker/backup.js?pending-single-group');
+
+  await backup.backupGroup(41);
+
+  assert.equal(reads[0], 'tabg:p:41');
+  assert.equal(reads.includes(null), false);
+  assert.equal(onlyArchive(local, 41).title, '旧组');
+  assert.equal(local.data['tabg:g:41'].title, '新组');
+});
+
+for (const pending of [true, false]) {
+  test(`一个组归档失败时不会提前启动其他组的归档（pending=${pending}）`, async () => {
+    const first = { ...snapshot, id: 31, title: '组 31' };
+    const second = { ...snapshot, id: 32, title: '组 32' };
+    const local = createStorage({
+      'tabg:g:31': first,
+      'tabg:g:32': second,
+      ...(pending ? { 'tabg:p:31': true, 'tabg:p:32': true } : {}),
+    });
+    const set = local.set;
+    let failed = true;
+    const writes = [];
+    local.set = async values => {
+      const keys = Object.keys(values);
+      writes.push(keys);
+      if (failed && keys.some(key => key.startsWith('tabg:a:31:'))) throw new Error('模拟组 31 归档失败');
+      return set(values);
+    };
+    globalThis.chrome = {
+      storage: { local },
+      tabGroups: { async query() { return []; } },
+    };
+    const backup = await import(`../dist/worker/backup.js?archive-order-${pending}`);
+
+    await assert.rejects(backup.initBackupAllGroups([], true));
+    const secondStarted = writes.some(keys => keys.includes('tabg:p:32'));
+    failed = false;
+    await backup.archiveGroup(31);
+    await backup.archiveGroup(32);
+    assert.equal(secondStarted, false);
+  });
+}
+
+for (const live of [true, false]) {
+  test(`恢复 v2 归档后残留 v1 不会重复或复活同编号快照（live=${live}）`, async () => {
+    const v2 = { ...snapshot, id: 33, title: 'v2 新快照' };
+    const v1 = { ...snapshot, id: 33, title: 'v1 旧快照' };
+    const local = createStorage({
+      'tabg:g:33': v2,
+      'tabg:p:33': true,
+      tabGroupBackup: { version: 1, active: { 33: v1 } },
+    });
+    globalThis.chrome = {
+      storage: { local },
+      tabGroups: { async query() { return live ? [{ ...group, id: 33 }] : []; } },
+    };
+    const backup = await import(`../dist/worker/backup.js?recovery-precedence-${live}`);
+
+    await backup.initBackupAllGroups([], true);
+    assert.equal(onlyArchive(local, 33).title, 'v2 新快照');
+    assert.equal(local.data['tabg:g:33'], undefined);
+    assert.equal(local.data.tabGroupBackup, undefined);
+  });
+}
+
+test('非法编号或与 active 键不一致的快照不会写到其他组归档', async () => {
+  for (const id of [Number.NaN, -1, 1.5, 2]) {
+    const local = createStorage({ 'tabg:g:1': { ...snapshot, id } });
+    globalThis.chrome = { storage: { local } };
+    await archiveGroup(1);
+
+    assert.equal(Object.keys(local.data).some(key => key.startsWith('tabg:a:')), false);
+    assert.equal(local.data['tabg:g:1'].id, id);
+    assert.equal(local.data['tabg:p:1'], undefined);
+  }
+});
+
+test('启动对账会纠正 active 键与快照编号不一致的数据', async () => {
+  for (const hasGetKeys of [true, false]) {
+    const local = createStorage({ 'tabg:g:1': { ...snapshot, id: 2 } });
+    if (!hasGetKeys) local.getKeys = undefined;
+    globalThis.chrome = { storage: { local }, tabGroups: { async query() { return [group]; } } };
+    await initBackupAllGroups([
+      { groupId: 1, index: 0, url: 'https://example.com/', title: '当前标签' },
+    ], true);
+
+    assert.equal(local.data['tabg:g:1'].id, 1);
+    assert.equal(Object.keys(local.data).some(key => key.startsWith('tabg:a:')), false);
+  }
+});
+
+test('畸形归档键不计数但仍保留供导出', async () => {
+  for (const hasGetKeys of [true, false]) {
+    const validKey = 'tabg:a:1:1700000000000:00000000-0000-4000-8000-000000000000';
+    const local = createStorage({
+      [validKey]: { ...snapshot, deletedAt: '2023-11-14T22:13:20.000Z' },
+      'tabg:a:not-a-group': { title: '畸形归档' },
+      'tabg:a:1': { title: '不完整归档' },
+    });
+    if (!hasGetKeys) local.getKeys = undefined;
+    globalThis.chrome = { storage: { local } };
+
+    assert.equal((await readBackups(false)).archived, 1);
+    const { entries } = await readBackups(true);
+    assert.equal(entries['tabg:a:not-a-group'].title, '畸形归档');
+    assert.equal(entries['tabg:a:1'].title, '不完整归档');
+  }
 });
 
 test('无法识别的备份格式保留原始数据供导出', async () => {
@@ -463,24 +640,26 @@ test('v1 单 key 数据成功迁移，存活与历史快照按 v2 归档', async
   assert.equal(onlyArchive(local, 2).deletedAt, deletedAt);
 });
 
-test('v1 归档迁移保留 Unix 纪元删除时间', async () => {
-  const deletedAt = '1970-01-01T00:00:00.000Z';
-  const legacy = {
-    version: 1,
-    active: {},
-    archived: [{ ...snapshot, id: 3, deletedAt }],
-  };
-  const local = createStorage({ tabGroupBackup: legacy });
-  globalThis.chrome = {
-    storage: { local },
-    tabGroups: { async query() { return []; } },
-  };
+test('v1 归档迁移保留 Unix 纪元及之前的删除时间', async () => {
+  for (const deletedAt of ['1970-01-01T00:00:00.000Z', '1969-12-31T23:59:59.999Z']) {
+    const legacy = {
+      version: 1,
+      active: {},
+      archived: [{ ...snapshot, id: 3, deletedAt }],
+    };
+    const local = createStorage({ tabGroupBackup: legacy });
+    globalThis.chrome = {
+      storage: { local },
+      tabGroups: { async query() { return []; } },
+    };
 
-  await initBackupAllGroups([], true);
+    await initBackupAllGroups([], true);
 
-  const archives = Object.keys(local.data).filter(key => key.startsWith('tabg:a:3:0:'));
-  assert.equal(archives.length, 1);
-  assert.equal(local.data[archives[0]].deletedAt, deletedAt);
+    const archives = Object.keys(local.data).filter(key => key.startsWith(`tabg:a:3:${Date.parse(deletedAt)}:`));
+    assert.equal(archives.length, 1);
+    assert.equal(local.data[archives[0]].deletedAt, deletedAt);
+    assert.equal((await readBackups(false)).archived, 1);
+  }
 });
 
 test('v1 迁移时存活空组也保留 active 供随后归档', async () => {

@@ -13,14 +13,7 @@ import {
   setProxyMode,
   syncProxyIndicator,
 } from '../dist/worker/proxy.js';
-import { createStorage } from './helpers.mjs';
-
-const localSocks = port => ({
-  mode: 'fixed_servers',
-  rules: {
-    singleProxy: { scheme: 'socks5', host: '127.0.0.1', port },
-  },
-});
+import { createStorage, flush, localSocks, proxyResult } from './helpers.mjs';
 
 function installChrome({ value = { mode: 'direct' }, levelOfControl = 'controlled_by_this_extension', initial = {}, failSet } = {}) {
   const local = createStorage(initial, { failSet });
@@ -260,4 +253,75 @@ test('慢返回的旧代理状态不会覆盖最新工具栏图标', async () =>
   assert.equal(reads, 2);
   assert.equal(icons.length, 1);
   assert.equal(icons[0].path[16], '/icon/socks5_16.png');
+});
+
+test('较慢的旧工具栏写入不会最后覆盖新图标和标题', async () => {
+  installChrome();
+  let releaseFirst;
+  let signalFirst;
+  let signalSecondRead;
+  const firstStarted = new Promise(resolve => { signalFirst = resolve; });
+  const secondRead = new Promise(resolve => { signalSecondRead = resolve; });
+  let first = true;
+  let currentIcon;
+  let currentTitle;
+  chrome.action.setIcon = async details => {
+    if (first) {
+      first = false;
+      signalFirst();
+      await new Promise(resolve => { releaseFirst = resolve; });
+    }
+    currentIcon = details.path[16];
+  };
+  chrome.action.setTitle = async details => { currentTitle = details.title; };
+
+  const stale = syncProxyIndicator();
+  await firstStarted;
+  chrome.proxy.settings.get = async () => {
+    signalSecondRead();
+    return proxyResult(localSocks(DEFAULT_PROXY_PORT));
+  };
+  const latest = syncProxyIndicator();
+  await secondRead;
+  await flush();
+  releaseFirst();
+  await Promise.all([stale, latest]);
+
+  assert.equal(currentIcon, '/icon/socks5_16.png');
+  assert.match(currentTitle, /本机 SOCKS5/);
+});
+
+test('旧工具栏写入部分失败时仍等待另一项结束再写最新状态', async () => {
+  installChrome();
+  let releaseOldTitle;
+  let signalOldTitle;
+  const oldTitleStarted = new Promise(resolve => { signalOldTitle = resolve; });
+  let firstIcon = true;
+  let firstTitle = true;
+  let currentTitle;
+  chrome.action.setIcon = async () => {
+    if (firstIcon) {
+      firstIcon = false;
+      throw new Error('模拟旧图标写入失败');
+    }
+  };
+  chrome.action.setTitle = async details => {
+    if (firstTitle) {
+      firstTitle = false;
+      signalOldTitle();
+      await new Promise(resolve => { releaseOldTitle = resolve; });
+    }
+    currentTitle = details.title;
+  };
+
+  const stale = syncProxyIndicator();
+  await oldTitleStarted;
+  chrome.proxy.settings.get = async () => proxyResult(localSocks(DEFAULT_PROXY_PORT));
+  const latest = syncProxyIndicator();
+  await flush();
+  releaseOldTitle();
+  await assert.rejects(stale);
+  await latest;
+
+  assert.match(currentTitle, /本机 SOCKS5/);
 });

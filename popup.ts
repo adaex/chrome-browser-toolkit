@@ -1,19 +1,23 @@
 import {
   LOCAL_PROXY_HOST,
+  proxyModeLabel,
   readProxyStatus,
   setProxyMode,
   type ProxyMode,
   type ProxyStatus,
 } from './worker/proxy.js';
-import { showStatus } from './ui.js';
+import { setProxyStatusIcon, showStatus } from './ui.js';
 
 const modeInputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[name="proxy-mode"]'));
 const statusText = document.querySelector<HTMLParagraphElement>('#proxy-status')!;
 const socksEndpoint = document.querySelector<HTMLElement>('#socks-endpoint')!;
+const statusIcon = document.querySelector<HTMLImageElement>('#proxy-status-icon')!;
 
 let busy = true;
 let blocked = false;
 let currentStatus: ProxyStatus | undefined;
+let refreshVersion = 0;
+let initializing = true;
 
 function updateDisabled() {
   for (const input of modeInputs) input.disabled = busy || blocked;
@@ -22,6 +26,7 @@ function updateDisabled() {
 function render(status: ProxyStatus) {
   currentStatus = status;
   blocked = status.controlledByOther;
+  setProxyStatusIcon(statusIcon, status.mode);
   socksEndpoint.textContent = `${LOCAL_PROXY_HOST}:${status.port}`;
 
   for (const input of modeInputs) {
@@ -37,16 +42,20 @@ function render(status: ProxyStatus) {
   } else if (status.mode === 'other') {
     showStatus(statusText,'当前是其他代理模式，选择一项即可替换');
   } else {
-    showStatus(statusText,status.mode === 'direct' ? '当前：直连' : '当前：本机 SOCKS5');
+    showStatus(statusText, `当前：${proxyModeLabel(status.mode)}`);
   }
 }
 
 async function refresh(errorMessage?: string) {
+  const version = ++refreshVersion;
   try {
     const status = await readProxyStatus();
+    if (version !== refreshVersion) return;
     render(status);
     if (errorMessage) showStatus(statusText,errorMessage, true);
   } catch (error) {
+    if (version !== refreshVersion) return;
+    setProxyStatusIcon(statusIcon, null);
     blocked = true;
     for (const input of modeInputs) {
       input.checked = false;
@@ -54,6 +63,13 @@ async function refresh(errorMessage?: string) {
     updateDisabled();
     showStatus(statusText,'读取代理状态失败，请重新打开弹窗', true);
     console.error(error);
+  } finally {
+    // 初始化期间发生事件时，只有最新一次读取可以启用控件
+    if (initializing && version === refreshVersion) {
+      initializing = false;
+      busy = false;
+      updateDisabled();
+    }
   }
 }
 
@@ -85,8 +101,8 @@ if (chrome.extension.inIncognitoContext) {
   updateDisabled();
   showStatus(statusText,'请在普通窗口中切换代理');
 } else {
-  refresh().finally(() => {
-    busy = false;
-    updateDisabled();
+  chrome.proxy.settings.onChange.addListener(() => {
+    void refresh();
   });
+  refresh();
 }

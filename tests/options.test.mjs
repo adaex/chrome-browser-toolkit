@@ -3,7 +3,7 @@ import { resolveObjectURL } from 'node:buffer';
 import test from 'node:test';
 
 import { loadFeatureSettings } from '../dist/worker/settings.js';
-import { createStorage, flush } from './helpers.mjs';
+import { createImage, createProxyIndicatorMock, createStorage, flush } from './helpers.mjs';
 
 let pageId = 0;
 
@@ -14,15 +14,21 @@ async function openOptions(local, incognito = false) {
   globalThis.window = page;
   function element(selector) {
     if (!nodes.has(selector)) {
-      const node = Object.assign(new EventTarget(), {
-        textContent: '', checked: false, disabled: false, classList: { toggle() {} },
-        click() { if (!this.disabled) this.dispatchEvent(new Event('click')); },
-      });
+      const node = selector === '#proxy-status-icon'
+        ? createImage()
+        : Object.assign(new EventTarget(), {
+            textContent: '', checked: false, disabled: false, classList: { toggle() {} },
+            click() { if (!this.disabled) this.dispatchEvent(new Event('click')); },
+          });
       nodes.set(selector, node);
     }
     return nodes.get(selector);
   }
-  globalThis.chrome = { storage: { local }, extension: { inIncognitoContext: incognito } };
+  globalThis.chrome = {
+    ...createProxyIndicatorMock(),
+    storage: { local },
+    extension: { inIncognitoContext: incognito },
+  };
   globalThis.document = Object.assign(new EventTarget(), {
     querySelector: element,
     createElement(tag) {
@@ -168,7 +174,7 @@ test('没有独立布尔值时沿用旧值，仅显式 false 关闭，读取不�
 });
 
 test('计数期间展开预览，旧计数先返回也要等预览读完才能刷新', async t => {
-  const local = createStorage({ 'tabg:a:1:100:id': { title: '归档' } });
+  const local = createStorage({ 'tabg:a:1:100:00000000-0000-4000-8000-000000000000': { title: '归档' } });
   const { element } = await openOptions(local);
   let finishListing, finishPreview;
   t.mock.method(local, 'getKeys', () => new Promise(resolve => { finishListing = resolve; }));
@@ -192,7 +198,7 @@ test('计数期间展开预览，旧计数先返回也要等预览读完才能�
 });
 
 test('预览已展开时连点刷新只读一次，读取失败后可以重试', async t => {
-  const local = createStorage({ 'tabg:a:1:100:id': { title: '归档' } });
+  const local = createStorage({ 'tabg:a:1:100:00000000-0000-4000-8000-000000000000': { title: '归档' } });
   const { element } = await openOptions(local);
   toggleDetails(element('#backup-details'), true);
   await flush();
@@ -276,7 +282,7 @@ for (const hasGetKeys of [true, false]) {
   test(`收起时只计数，展开、刷新和导出按需读取新旧备份（getKeys=${hasGetKeys}）`, async t => {
     const backups = {
       'tabg:g:1': { title: '存活组' },
-      'tabg:a:1:100:id': { title: '归档' },
+      'tabg:a:1:100:00000000-0000-4000-8000-000000000000': { title: '归档' },
       tabGroupBackup: { groups: {} },
     };
     const local = createStorage({ ...backups, 'tabg:meta': {}, proxyPort: 8080 });
@@ -295,7 +301,7 @@ for (const hasGetKeys of [true, false]) {
     assert.deepEqual(backupReads, hasGetKeys ? [] : [null]);
     if (hasGetKeys) assert.equal(enumerate.callCount(), 1);
 
-    backups['tabg:a:2:200:id'] = local.data['tabg:a:2:200:id'] = { title: '新归档' };
+    backups['tabg:a:2:200:00000000-0000-4000-8000-000000000001'] = local.data['tabg:a:2:200:00000000-0000-4000-8000-000000000001'] = { title: '新归档' };
     get.resetCalls();
     element('#refresh').click();
     await flush();

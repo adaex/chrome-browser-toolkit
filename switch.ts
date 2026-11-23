@@ -1,4 +1,4 @@
-import { requestExternalProxyMode } from './worker/proxy.js';
+import { proxyModeLabel, requestExternalProxyMode } from './worker/proxy.js';
 import { showStatus } from './ui.js';
 
 const statusText = document.querySelector<HTMLParagraphElement>('#proxy-status')!;
@@ -15,7 +15,7 @@ async function run() {
     return;
   }
 
-  const label = mode === 'direct' ? '直连' : '本机 SOCKS5';
+  const label = proxyModeLabel(mode);
   showStatus(statusText,`正在切换为${label}…`);
   try {
     if (!await requestExternalProxyMode(mode)) {

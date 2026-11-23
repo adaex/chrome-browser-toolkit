@@ -2,7 +2,7 @@ import { readBackups } from './worker/backup.js';
 import { isValidProxyPort, loadProxyPort, saveProxyPort } from './worker/proxy.js';
 import { Queue } from './worker/queue.js';
 import { type FeatureSettings, loadFeatureSettings, saveFeatureSetting } from './worker/settings.js';
-import { showStatus } from './ui.js';
+import { showStatus, startProxyStatusIconSync } from './ui.js';
 
 const featureInputs = [
   ['deduplicate', document.querySelector<HTMLInputElement>('#deduplicate')!],
@@ -13,6 +13,7 @@ const proxyForm = document.querySelector<HTMLFormElement>('#proxy-form')!;
 const proxyPort = document.querySelector<HTMLInputElement>('#proxy-port')!;
 const proxySave = document.querySelector<HTMLButtonElement>('#proxy-save')!;
 const proxyStatus = document.querySelector<HTMLParagraphElement>('#proxy-status')!;
+const proxyStatusIcon = document.querySelector<HTMLImageElement>('#proxy-status-icon')!;
 const backupStatus = document.querySelector<HTMLParagraphElement>('#backup-status')!;
 const exportStatus = document.querySelector<HTMLParagraphElement>('#export-status')!;
 const backupDetails = document.querySelector<HTMLDetailsElement>('#backup-details')!;
@@ -181,6 +182,7 @@ if (!inIncognitoContext) {
   exportButton.addEventListener('click', exportBackups);
   loadBackups();
 }
+startProxyStatusIconSync(proxyStatusIcon);
 loadProxyPort().then(port => {
   if (!proxyPortEdited) proxyPort.value = String(port);
 }).catch(error => {

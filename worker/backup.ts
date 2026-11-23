@@ -29,25 +29,44 @@ interface GroupSnapshot {
 //   tabg:meta                     -> { lastInitAt }
 //   tabg:g:<groupId>              -> 存活组的快照，每组一个 key；键集合本身就是存活组真相
 //   tabg:a:<groupId>:<删除毫秒时间戳>:<随机ID> -> 已删除组的归档，只增不删，恢复靠人工读 JSON
+//   tabg:p:<groupId>              -> 归档尚未完成的标记，成功后才删除
 const META_KEY = 'tabg:meta';
 const ACTIVE_PREFIX = 'tabg:g:';
 const ARCHIVE_PREFIX = 'tabg:a:';
+const PENDING_ARCHIVE_PREFIX = 'tabg:p:';
 const LEGACY_KEY = 'tabGroupBackup'; // v1 的单 key，首次 init 时一次性迁移
 const INIT_THROTTLE_MS = 5 * 60 * 1000; // SW 频繁重启，全量 init 5 分钟最多一次
 
 const activeKey = (groupId: number) => `${ACTIVE_PREFIX}${groupId}`;
 const archiveKey = (groupId: number, deletedAtMs: number) =>
   `${ARCHIVE_PREFIX}${groupId}:${deletedAtMs}:${crypto.randomUUID()}`;
+const pendingArchiveKey = (groupId: number) => `${PENDING_ARCHIVE_PREFIX}${groupId}`;
+
+function prefixedIdOf(key: string, prefix: string): number | undefined {
+  if (!key.startsWith(prefix)) return;
+  const id = Number(key.slice(prefix.length));
+  if (Number.isSafeInteger(id) && id >= 0 && key === `${prefix}${id}`) return id;
+}
 
 function activeIdOf(key: string): number | undefined {
-  if (!key.startsWith(ACTIVE_PREFIX)) return;
-  const id = Number(key.slice(ACTIVE_PREFIX.length));
-  if (Number.isSafeInteger(id) && id >= 0 && key === activeKey(id)) return id;
+  return prefixedIdOf(key, ACTIVE_PREFIX);
+}
+
+function archiveIdOf(key: string): number | undefined {
+  const match = /^tabg:a:(0|[1-9]\d*):(-?(?:0|[1-9]\d*)):[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.exec(key);
+  if (!match) return;
+  const id = Number(match[1]);
+  const deletedAtMs = Number(match[2]);
+  if (Number.isSafeInteger(id) && Number.isSafeInteger(deletedAtMs)) return id;
+}
+
+function pendingArchiveIdOf(key: string): number | undefined {
+  return prefixedIdOf(key, PENDING_ARCHIVE_PREFIX);
 }
 
 function backupKind(key: string) {
   if (activeIdOf(key) !== undefined) return 'active';
-  if (key.startsWith(ARCHIVE_PREFIX)) return 'archived';
+  if (archiveIdOf(key) !== undefined) return 'archived';
   if (key === LEGACY_KEY) return 'legacy';
 }
 
@@ -60,8 +79,8 @@ export async function readBackups(includeEntries: boolean) {
   for (const key of keys) {
     const kind = backupKind(key);
     if (kind) result[kind]++;
-    // 编号异常的原始条目仍可导出供人工查看，但不计入有效编号的快照数
-    else if (result.entries && !key.startsWith(ACTIVE_PREFIX)) delete result.entries[key];
+    // 格式异常的原始快照和归档仍可导出供人工查看，但不计入有效份数
+    else if (result.entries && !key.startsWith(ACTIVE_PREFIX) && !key.startsWith(ARCHIVE_PREFIX)) delete result.entries[key];
   }
   return result;
 }
@@ -75,11 +94,14 @@ async function readLastInitAt(): Promise<number> {
 }
 
 // 读出的数据不信任形状，归一失败就当不存在，避免一份畸形数据让所有备份永久抛错
-function sanitizeSnapshot(value: unknown): GroupSnapshot | null {
+function sanitizeSnapshot(value: unknown, expectedId?: number): GroupSnapshot | null {
   if (!value || typeof value !== 'object') return null;
   const v = value as Record<string, unknown>;
   if (
     typeof v.id !== 'number' ||
+    !Number.isSafeInteger(v.id) ||
+    v.id < 0 ||
+    (expectedId !== undefined && v.id !== expectedId) ||
     typeof v.title !== 'string' ||
     typeof v.color !== 'string' ||
     typeof v.updatedAt !== 'string' ||
@@ -188,9 +210,34 @@ async function snapshotFingerprint(snapshot: GroupSnapshot): Promise<string> {
 // 不为此增加存储读取；SW 重启后缓存自然清空，首次备份仍保守写入
 const activeSnapshotCache = new Map<number, string>();
 const unfinishedArchives = new Set<number>();
+let unfinishedArchivesLoaded = false;
 
-// 备份单个标签组：只写这一个组的 key，不读不写其他数据
+// 每个 SW 只恢复一次持久化标记，避免重启后同编号的新组覆盖尚未归档的旧快照
+// 返回首次枚举结果，未发生归档恢复时供对账复用，避免重复读取全库
+async function ensureUnfinishedArchives() {
+  if (unfinishedArchivesLoaded) return;
+  const storage = chrome.storage.local;
+  const keysOrRecord = typeof storage.getKeys === 'function' ? await storage.getKeys() : await storage.get(null);
+  const keys = Array.isArray(keysOrRecord) ? keysOrRecord : Object.keys(keysOrRecord);
+  for (const key of keys) {
+    const id = pendingArchiveIdOf(key);
+    if (id !== undefined) unfinishedArchives.add(id);
+  }
+  unfinishedArchivesLoaded = true;
+  return keysOrRecord;
+}
+
+async function ensureUnfinishedArchive(groupId: number) {
+  if (unfinishedArchivesLoaded || unfinishedArchives.has(groupId)) return;
+  const key = pendingArchiveKey(groupId);
+  const result = await chrome.storage.local.get(key);
+  if (result[key] !== undefined) unfinishedArchives.add(groupId);
+}
+
+// 备份单个标签组：常规路径只写该组 active，不读取其他组的内容
 export async function backupGroup(groupId: number, isCurrent = () => true) {
+  // 启动对账尚未恢复标记时，只检查当前组，避免归档积累放大单组备份
+  await ensureUnfinishedArchive(groupId);
   // 编号被复用时，旧快照必须先成功归档，新组才能占用同一个键
   if (unfinishedArchives.has(groupId)) await archiveGroup(groupId);
   const tabs = await chrome.tabs.query({ groupId });
@@ -220,14 +267,19 @@ export async function archiveGroup(groupId: number) {
   // 归档可能改变或移除 active；先失效，失败时也只是后续备份多写一次
   activeSnapshotCache.delete(groupId);
   unfinishedArchives.add(groupId);
+  const pendingKey = pendingArchiveKey(groupId);
+  const storage = chrome.storage.local;
+  // 标记必须先落盘，再读取 active；失败时不能留下迟到的标记写入
+  await storage.set({ [pendingKey]: true });
   const key = activeKey(groupId);
-  const result = await chrome.storage.local.get(key);
-  const snapshot = sanitizeSnapshot(result[key]);
+  const result = await storage.get(key);
+  const snapshot = sanitizeSnapshot(result[key], groupId);
   if (snapshot) {
     const [archiveK, archiveV] = archiveEntry(snapshot, Date.now());
-    await chrome.storage.local.set({ [archiveK]: archiveV });
-    await chrome.storage.local.remove(key);
+    await storage.set({ [archiveK]: archiveV });
+    await storage.remove(key);
   }
+  await storage.remove(pendingKey);
   unfinishedArchives.delete(groupId);
 }
 
@@ -235,6 +287,9 @@ export async function archiveGroup(groupId: number) {
 // 从第一次标签查询前开始跟踪删除事件，直到写入完成，避免跨组拼接快照
 export function initBackupAllGroups(allTabs?: chrome.tabs.Tab[], force = false) {
   return trackGroupObjectChanges(async () => {
+    const initialStorage = await ensureUnfinishedArchives();
+    // 有待归档快照时跳过节流，优先保住旧组，再处理可能复用编号的新组
+    if (unfinishedArchives.size) force = true;
     let tabs = allTabs ?? await rebuildGroupCache();
     if (!allTabs && consumeColdMiss()) {
       tabs = await rebuildGroupCache();
@@ -245,7 +300,7 @@ export function initBackupAllGroups(allTabs?: chrome.tabs.Tab[], force = false) 
       const elapsed = Date.now() - lastInitAt;
       if (elapsed >= 0 && elapsed < INIT_THROTTLE_MS) return;
     }
-    await reconcileBackup(tabs);
+    await reconcileBackup(tabs, initialStorage);
   });
 }
 
@@ -257,18 +312,29 @@ function isLegacyBackup(value: unknown): value is { active?: Record<string, unkn
     (archived === undefined || Array.isArray(archived));
 }
 
-async function reconcileBackup(allTabs: chrome.tabs.Tab[]) {
+async function reconcileBackup(
+  allTabs: chrome.tabs.Tab[],
+  initialStorage?: string[] | Record<string, unknown>,
+) {
   // 对账可能分批写 active、删旧 key；任一步失败都只损失缓存命中，后续备份会保守重写
   activeSnapshotCache.clear();
 
   const storage = chrome.storage.local;
+  // 先恢复未完成归档，再读取存储；串行确保失败后没有迟到写入越过队列
+  const recoveredArchiveIds = new Set(unfinishedArchives);
+  for (const groupId of recoveredArchiveIds) await archiveGroup(groupId);
+
   // Chrome 130+ 可只枚举键名：归档字节完全不读；老版本回退全量读取
   const hasGetKeys = typeof storage.getKeys === 'function';
+  // 恢复归档会改写存储，只有无需恢复时才能复用启动时的枚举结果
+  const reusableStorage = recoveredArchiveIds.size === 0 ? initialStorage : undefined;
 
   // 实时存活组、存储侧键集合、v1 旧数据三件互不依赖的事并行
   const [groups, keysOrRecord, legacyWrap] = await Promise.all([
     chrome.tabGroups.query({}),
-    hasGetKeys ? storage.getKeys() : storage.get(null),
+    reusableStorage !== undefined
+      ? Promise.resolve(reusableStorage)
+      : hasGetKeys ? storage.getKeys() : storage.get(null),
     hasGetKeys ? storage.get(LEGACY_KEY) : Promise.resolve(null),
   ]);
 
@@ -289,7 +355,7 @@ async function reconcileBackup(allTabs: chrome.tabs.Tab[]) {
     if (id === undefined) continue;
     storedActiveIds.add(id);
     if (fullRecord) {
-      const snapshot = sanitizeSnapshot(fullRecord[key]);
+      const snapshot = sanitizeSnapshot(fullRecord[key], id);
       if (snapshot) {
         prior.set(id, snapshot);
         if (isCanonicalSnapshot(fullRecord[key], snapshot)) canonicalActiveIds.add(id);
@@ -301,7 +367,7 @@ async function reconcileBackup(allTabs: chrome.tabs.Tab[]) {
   if (hasGetKeys && storedActiveIds.size) {
     const activeRecord = await storage.get([...storedActiveIds].map(activeKey));
     for (const id of storedActiveIds) {
-      const snapshot = sanitizeSnapshot(activeRecord[activeKey(id)]);
+      const snapshot = sanitizeSnapshot(activeRecord[activeKey(id)], id);
       if (snapshot) {
         prior.set(id, snapshot);
         if (isCanonicalSnapshot(activeRecord[activeKey(id)], snapshot)) canonicalActiveIds.add(id);
@@ -317,12 +383,16 @@ async function reconcileBackup(allTabs: chrome.tabs.Tab[]) {
   if (isLegacyBackup(legacy)) {
     for (const value of Object.values(legacy.active ?? {})) {
       const snapshot = sanitizeSnapshot(value);
-      if (!snapshot) continue;
-      storedActiveIds.add(snapshot.id);
-      // 上次迁移可能已写入更新的 v2；legacy 只补齐没有有效 v2 的 active
-      if (!prior.has(snapshot.id)) {
+      // 待归档标记也代表 v2 已处理删除，残留 v1 不得重复归档或复活
+      if (!snapshot || prior.has(snapshot.id) || recoveredArchiveIds.has(snapshot.id)) continue;
+      if (liveIds.has(snapshot.id)) {
+        // 存活组仍按 active 迁移，下面的实时快照会更新内容和时间
         prior.set(snapshot.id, snapshot);
         toSet[activeKey(snapshot.id)] = snapshot;
+      } else {
+        // 已删除组直接写归档，不把 v1 数据混入 v2 active 对账
+        const [key, archiveValue] = archiveEntry(snapshot, Date.now());
+        toSet[key] = archiveValue;
       }
     }
     if (legacy.archived) {
@@ -338,15 +408,11 @@ async function reconcileBackup(allTabs: chrome.tabs.Tab[]) {
     toRemove.push(LEGACY_KEY);
   }
 
-  // 死组 = 存储有 active 键但实时已不存在（SW 没在运行时漏掉的 onRemoved）。
+  // v2 死组复用单组归档的持久化保护；畸形 active 移除，避免卡住后续对账
   const deadIds = [...storedActiveIds].filter(id => !liveIds.has(id));
   for (const id of deadIds) {
-    const snapshot = prior.get(id);
-    if (snapshot) {
-      const [key, value] = archiveEntry(snapshot, Date.now());
-      toSet[key] = value;
-    }
-    toRemove.push(activeKey(id)); // 有效快照先归档；畸形或无值只能移除 active，避免卡住后续对账
+    if (prior.has(id)) await archiveGroup(id);
+    else toRemove.push(activeKey(id));
   }
 
   const tabsByGroup = new Map<number, chrome.tabs.Tab[]>();

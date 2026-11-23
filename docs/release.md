@@ -14,7 +14,7 @@
 
 只在主工作树的 `.env` 填写 `CWS_PUBLISHER_ID`、`CWS_EXTENSION_ID`、`CWS_PROJECT_ID` 和 `CWS_SERVICE_ACCOUNT`，文件权限设为 `600`。这些是标识，不是私钥；其他工作树共用这份配置，但只打包当前工作树的代码
 
-首次使用时，按[商店服务账号指南](https://developer.chrome.com/docs/webstore/service-accounts)绑定账号，在专用项目启用 Chrome Web Store API 和 IAM Service Account Credentials API，给操作者授予该服务账号的 Token Creator 角色。在 `CLOUDSDK_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/cws-publisher/private-browser-toolkit"` 下运行 `gcloud auth application-default login --impersonate-service-account=<服务账号邮箱> --scopes=https://www.googleapis.com/auth/chromewebstore --disable-quota-project`。此后命令按需取得短期令牌，不需要导出私钥或打开 Chrome
+首次使用时，按[商店服务账号指南](https://developer.chrome.com/docs/webstore/service-accounts)绑定账号，在专用项目启用 Chrome Web Store API 和 IAM Service Account Credentials API，给操作者授予该服务账号的 Token Creator 角色。在 `CLOUDSDK_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/cws-publisher/private-browser-toolkit"` 下运行 `gcloud auth application-default login --impersonate-service-account=<服务账号邮箱> --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/chromewebstore --disable-quota-project`。`cloud-platform` 用于调用 IAM 签发模拟账号令牌，`chromewebstore` 用于商店 API；若此前只授权了后者，需用同一配置目录重新执行登录命令。此后命令按需取得短期令牌，不需要导出私钥或打开 Chrome
 
 ## 完整流程
 
