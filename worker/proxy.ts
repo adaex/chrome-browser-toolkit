@@ -215,7 +215,7 @@ export async function syncProxyIndicator(): Promise<void> {
     if (syncVersion !== indicatorSyncVersion) return;
     const results = await Promise.allSettled([
       chrome.action.setIcon({ path: ACTION_ICONS[status.mode] }),
-      chrome.action.setTitle({ title: `Private Browser Toolkit\n当前：${mode}${controller}` }),
+      chrome.action.setTitle({ title: `Browser Toolkit\n当前：${mode}${controller}` }),
     ]);
     for (const result of results) {
       if (result.status === 'rejected') throw result.reason;

@@ -19,7 +19,7 @@ test('商店命令：查询只读，保护待审和线上版本，上传成功�
   put('.git/info/exclude', '*\n');
   const item = 'a'.repeat(32);
   put('.env', `CWS_PUBLISHER_ID=00000000-0000-0000-0000-000000000000\nCWS_EXTENSION_ID=${item}\nCWS_PROJECT_ID=local-demo\nCWS_SERVICE_ACCOUNT=cws-demo@local-demo.iam.gserviceaccount.com\n`);
-  put('config/cws-publisher/private-browser-toolkit/application_default_credentials.json', '{}');
+  put('config/cws-publisher/browser-toolkit/application_default_credentials.json', '{}');
   put('tools/google-cloud-sdk/bin/gcloud', '#!/bin/sh\nprintf fixture-token\n', 0o700);
   const version = '2.0';
   put('package.json', JSON.stringify({ chromeWebStoreId: item }));

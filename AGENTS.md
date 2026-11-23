@@ -2,7 +2,7 @@
 
 ## 项目
 
-Private Browser Toolkit 是 Chrome Manifest V3 扩展，提供直连与本机 SOCKS5 切换、标签页管理和标签组本地备份，后台使用 Service Worker
+Browser Toolkit 是 Chrome Manifest V3 扩展，提供直连与本机 SOCKS5 切换、标签页管理和标签组本地备份，后台使用 Service Worker
 
 Chrome 加载构建后的 `dist/`，不要直接加载仓库根目录
 

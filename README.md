@@ -1,4 +1,4 @@
-# Private Browser Toolkit
+# Browser Toolkit
 
 一个 Chrome 扩展，提供代理切换、标签页管理和标签组本地备份功能
 
@@ -56,8 +56,8 @@ open -g -a "Google Chrome" \
 ### 从源码构建
 
 ```bash
-git clone git@github.com:adaex/chrome-private-browser-toolkit.git
-cd chrome-private-browser-toolkit
+git clone git@github.com:adaex/chrome-browser-toolkit.git
+cd chrome-browser-toolkit
 yarn
 yarn build
 ```

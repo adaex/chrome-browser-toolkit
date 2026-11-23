@@ -51,7 +51,7 @@ function readConfig(home) {
 }
 
 function accessToken(home, account) {
-  const config = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'cws-publisher', 'private-browser-toolkit');
+  const config = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'cws-publisher', 'browser-toolkit');
   const adc = join(config, 'application_default_credentials.json');
   checkPrivateFile(adc, '本机 Google Cloud 授权文件');
   const localSdk = join(home, 'tools', 'google-cloud-sdk', 'bin', 'gcloud');
