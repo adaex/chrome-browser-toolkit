@@ -4,7 +4,7 @@ export const DEFAULT_PROXY_PORT = 7890;
 const PROXY_PORT_KEY = 'proxyPort';
 
 export type ProxyMode = 'direct' | 'socks5';
-export type ProxyModeState = ProxyMode | 'other';
+export type ProxyModeState = ProxyMode | 'system' | 'other';
 export const PROXY_MESSAGE = 'proxyWrite';
 
 type ProxyWrite =
@@ -25,6 +25,12 @@ export interface ProxyStatus {
 }
 
 // 根路径开头不能省：Service Worker 内相对路径会加载失败，工具栏一直保留初始图标
+const GRAY_ACTION_ICONS = {
+  16: '/icon/other_16.png',
+  32: '/icon/other_32.png',
+  48: '/icon/other_48.png',
+} as const;
+
 const ACTION_ICONS = {
   direct: {
     16: '/icon/icon_16.png',
@@ -36,16 +42,14 @@ const ACTION_ICONS = {
     32: '/icon/socks5_32.png',
     48: '/icon/socks5_48.png',
   },
-  other: {
-    16: '/icon/other_16.png',
-    32: '/icon/other_32.png',
-    48: '/icon/other_48.png',
-  },
+  system: GRAY_ACTION_ICONS,
+  other: GRAY_ACTION_ICONS,
 } as const;
 
 const PAGE_ICONS: Record<ProxyModeState, string> = {
   direct: 'icon/icon.svg',
   socks5: 'icon/socks5.svg',
+  system: 'icon/other.svg',
   other: 'icon/other.svg',
 };
 
@@ -65,6 +69,7 @@ function assertRegularProxyContext() {
 
 export function proxyModeOf(value: chrome.proxy.ProxyConfig): ProxyModeState {
   if (value.mode === 'direct') return 'direct';
+  if (value.mode === 'system') return 'system';
   const proxy = value.rules?.singleProxy;
   if (
     value.mode === 'fixed_servers' &&
@@ -79,6 +84,7 @@ export function proxyModeOf(value: chrome.proxy.ProxyConfig): ProxyModeState {
 export function proxyModeLabel(mode: ProxyModeState): string {
   if (mode === 'direct') return '直连';
   if (mode === 'socks5') return '本机 SOCKS5';
+  if (mode === 'system') return '跟随系统设置';
   return '其他代理模式';
 }
 

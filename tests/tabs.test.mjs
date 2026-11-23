@@ -84,6 +84,35 @@ test('从同网址 opener 打开时保留重复标签', async () => {
   assert.equal(await checkDuplicate(newTab.id), false);
 });
 
+test('空白页面保留新打开的标签并关闭旧标签', async () => {
+  const oldTab = { id: 1, url: 'about:blank', groupId: -1, windowId: 1, pinned: false };
+  const newTab = { ...oldTab, id: 2 };
+  const removed = [];
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [oldTab, newTab]; },
+      async remove(id) { removed.push(id); },
+    },
+  };
+
+  assert.equal(await checkDuplicate(newTab.id), false);
+  assert.deepEqual(removed, [oldTab.id]);
+});
+
+test('固定标签导航到已打开的普通网址时保留固定标签', async () => {
+  const oldTab = { id: 1, url: 'https://example.com/', groupId: -1, windowId: 1, pinned: false };
+  const pinnedTab = { ...oldTab, id: 2, pinned: true };
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [oldTab, pinnedTab]; },
+      async update() { assert.fail('不应激活其他标签'); },
+      async remove() { assert.fail('不应关闭固定标签'); },
+    },
+  };
+
+  assert.equal(await checkDuplicate(pinnedTab.id), false);
+});
+
 test('旧标签激活失败时保留当前标签并抛出错误', async () => {
   const removed = [];
   const oldTab = {

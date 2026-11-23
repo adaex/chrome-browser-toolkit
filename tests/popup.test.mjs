@@ -122,6 +122,15 @@ test('初始化事件刷新完成前不会被旧请求提前启用控件', async
   assert.equal(page.status.textContent, '当前：本机 SOCKS5');
 });
 
+test('系统代理显示独立状态且不误选直连或 SOCKS5', async () => {
+  const page = await openPopup(false, async () => proxyResult({ mode: 'system' }));
+  assert.equal(page.direct.checked, false);
+  assert.equal(page.socks5.checked, false);
+  assert.equal(page.status.textContent, '当前：跟随系统设置');
+  assert.equal(page.image.src, 'icon/other.svg');
+  assert.equal(page.image.alt, '当前代理：跟随系统设置');
+});
+
 test('弹窗刷新失败时隐藏旧图标', async t => {
   t.mock.method(console, 'error', () => {});
   const page = await openPopup();

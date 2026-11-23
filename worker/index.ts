@@ -16,19 +16,19 @@ const proxyWriteQueue = new Queue();
 
 function startNormalMode() {
   // 去重查询读取当时的标签，不依赖事件里的网址；查询发出前，同一标签只排一次
-  type TabCheck = { tabId: number; newWindowId?: number; merged: boolean };
+  type TabCheck = { tabId: number; newWindowId?: number; focusedWindowId?: number; merged: boolean };
   const pendingTabChecks = new Map<number, TabCheck>();
   const changedTabs = new Set<number>(); // 只跟踪当前查询期间导航或关闭的标签
   const isCurrent = (id: number) => !changedTabs.has(id);
   let checking: TabCheck | undefined;
-  function scheduleTabCheck(tabId: number, newWindowId?: number) {
+  function scheduleTabCheck(tabId: number, newWindowId?: number, focusedWindowId?: number) {
     const pending = pendingTabChecks.get(tabId);
     if (pending) {
       pending.merged = true;
       pending.newWindowId ??= newWindowId;
       return;
     }
-    const check: TabCheck = { tabId, newWindowId, merged: false };
+    const check: TabCheck = { tabId, newWindowId, focusedWindowId, merged: false };
     pendingTabChecks.set(tabId, check);
     queue.run(async () => {
       if (pendingTabChecks.get(tabId) !== check) return;
@@ -37,6 +37,10 @@ function startNormalMode() {
         if (pendingTabChecks.get(tabId) !== check) return;
         pendingTabChecks.delete(tabId);
         checking = check;
+        if (settings.deduplicate && check.focusedWindowId !== undefined) {
+          const sourceWindow = await chrome.windows.get(check.focusedWindowId);
+          if (!sourceWindow.focused || !isCurrent(tabId)) return;
+        }
         const removed = settings.deduplicate && await checkDuplicate(tabId, isCurrent);
         if (!isCurrent(tabId) || removed || !settings.fullscreen || check.newWindowId === undefined) return;
         check.merged = false;
@@ -50,7 +54,7 @@ function startNormalMode() {
         const pending = pendingTabChecks.get(tabId) === check;
         if (pending) pendingTabChecks.delete(tabId);
         if (check.merged && (pending || (checking === check && isCurrent(tabId)))) {
-          scheduleTabCheck(tabId, check.newWindowId);
+          scheduleTabCheck(tabId, check.newWindowId, check.focusedWindowId);
         }
         throw error;
       } finally {
@@ -123,7 +127,15 @@ function startNormalMode() {
     if (changeInfo.url) {
       if (checking) changedTabs.add(tabId);
       if (isProxySwitchUrl(changeInfo.url)) pendingTabChecks.delete(tabId);
-      else scheduleTabCheck(tabId, checking?.tabId === tabId ? checking.newWindowId : undefined);
+      // 已有后台标签的跳转不新排去重，避免激活旧标签或聚焦其他窗口；
+      // 创建检查已经排队的标签仍要完成本次检查，新窗口吸附也不因后续导航丢失
+      else if (tab.active || pendingTabChecks.has(tabId) || checking?.tabId === tabId) {
+        const current = checking?.tabId === tabId ? checking : undefined;
+        const focusedWindowId = current
+          ? current.focusedWindowId
+          : pendingTabChecks.has(tabId) ? undefined : tab.windowId;
+        scheduleTabCheck(tabId, current?.newWindowId, focusedWindowId);
+      }
     }
 
     // complete 后拍下当前标题；之后 SPA 等场景再改标题时补拍

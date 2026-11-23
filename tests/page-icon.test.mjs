@@ -61,6 +61,12 @@ test('页面品牌图随实际代理模式切换，相同模式不重复设置�
   value = { mode: 'system' };
   emit(value);
   assert.equal(image.src, 'icon/other.svg');
+  assert.equal(image.alt, '当前代理：跟随系统设置');
+  assert.equal(image.assignments, 2);
+
+  value = { mode: 'auto_detect' };
+  emit(value);
+  assert.equal(image.src, 'icon/other.svg');
   assert.equal(image.alt, '当前代理：其他代理模式');
   assert.equal(image.assignments, 2);
 });

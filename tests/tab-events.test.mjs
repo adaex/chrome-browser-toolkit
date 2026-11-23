@@ -127,6 +127,50 @@ test('等激活时旧标签已导航，不会关闭原网址的最后一个标�
   assert.deepEqual(removed, []);
 });
 
+test('后台导航不新排去重，当前标签导航仍执行', async t => {
+  const tabs = [tab(1), tab(2), { ...tab(3), active: true }];
+  const { listeners } = await start('background-navigation', tabs);
+  const queries = t.mock.method(chrome.tabs, 'query').mock;
+  const activated = [];
+  const removed = [];
+  chrome.tabs.update = async id => { activated.push(id); };
+  chrome.tabs.remove = async id => { removed.push(id); };
+  chrome.windows = { async get() { return { focused: true }; } };
+  tabs[1].url = tabs[0].url;
+
+  listeners.updated(2, { url: tabs[1].url }, { ...tabs[1], active: false });
+  await drain();
+  assert.equal(queries.callCount(), 0);
+  assert.deepEqual(activated, []);
+  assert.deepEqual(removed, []);
+
+  listeners.updated(2, { url: tabs[1].url }, { ...tabs[1], active: true });
+  await drain();
+  assert.equal(queries.callCount(), 1);
+  assert.deepEqual(activated, [1]);
+  assert.deepEqual(removed, [2]);
+});
+
+test('后台窗口的选中标签导航不触发去重或聚焦其他窗口', async t => {
+  const existing = tab(1);
+  const source = { ...tab(2), active: true, windowId: 2, url: existing.url };
+  const { listeners } = await start('unfocused-window-navigation', [existing, source]);
+  const queries = t.mock.method(chrome.tabs, 'query').mock;
+  const focused = [];
+  let focusReads = 0;
+  chrome.windows = {
+    async get() { focusReads++; return { focused: false }; },
+    async update(id) { focused.push(id); },
+  };
+
+  listeners.updated(source.id, { url: source.url }, source);
+  await drain();
+
+  assert.equal(focusReads, 1);
+  assert.equal(queries.callCount(), 0);
+  assert.deepEqual(focused, []);
+});
+
 test('查询期间关闭新标签页，不再根据旧结果关闭另一个新标签页', async () => {
   const tabs = [1, 2].map(id => ({ ...tab(id), url: 'chrome://newtab/' }));
   const { listeners } = await start('source-closed', tabs);

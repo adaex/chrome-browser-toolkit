@@ -37,11 +37,14 @@ export async function checkDuplicate(tabId: number, isCurrent: (id: number) => b
   const { target: existedTab, preference } = pickTarget(duplicates, tab);
   if (existedTab.id == null) return false;
 
-  // 特殊情况：打开新标签页，直接关闭历史标签页，新标签保留（不查 pinned，有意）
-  if (url.startsWith('chrome://new')) {
+  // 新建页面只保留最新打开的一个：直接关闭历史标签，保留当前标签（不查 pinned，有意）
+  if (url.startsWith('chrome://new') || url === 'about:blank') {
     await chrome.tabs.remove(existedTab.id);
     return false;
   }
+
+  // 固定标签的位置是用户明确保留的，普通网址导航不把它当作可关闭的新标签
+  if (tab.pinned) return false;
 
   // 特殊情况：复制 tab 的场景（自己打开自己），允许重复，本次操作忽略
   if (tab.openerTabId != null && duplicates.some(other => other.id === tab.openerTabId)) return false;

@@ -35,6 +35,7 @@ const ACTIVE_PREFIX = 'tabg:g:';
 const ARCHIVE_PREFIX = 'tabg:a:';
 const PENDING_ARCHIVE_PREFIX = 'tabg:p:';
 const LEGACY_KEY = 'tabGroupBackup'; // v1 的单 key，首次 init 时一次性迁移
+const BROWSER_SESSION_KEY = 'tabg:browser-session'; // storage.session 只用于识别 Chrome 是否重启
 const INIT_THROTTLE_MS = 5 * 60 * 1000; // SW 频繁重启，全量 init 5 分钟最多一次
 
 const activeKey = (groupId: number) => `${ACTIVE_PREFIX}${groupId}`;
@@ -176,6 +177,12 @@ function snapshotGroup(group: TabGroup, tabs: TabSnapshot[], updatedAt: string):
   return { id: group.id, title: group.title ?? '', color: group.color, tabs, updatedAt };
 }
 
+// Chrome 只在单个浏览器会话内保证组 ID 唯一。恢复会话时用稳定内容寻找旧快照；
+// 标签标题会在加载后变化，不参与匹配，调用方还要求旧组和新组都唯一，避免猜测
+function restoreIdentityOf(snapshot: GroupSnapshot): string {
+  return JSON.stringify([snapshot.title, snapshot.color, snapshot.tabs.map(tab => tab.url)]);
+}
+
 // updatedAt 只记录拍照时间；内容没变时无需为了刷新时间戳再写一次存储
 function sameSnapshotContent(a: GroupSnapshot, b: GroupSnapshot): boolean {
   if (
@@ -287,7 +294,16 @@ export async function archiveGroup(groupId: number) {
 // 从第一次标签查询前开始跟踪删除事件，直到写入完成，避免跨组拼接快照
 export function initBackupAllGroups(allTabs?: chrome.tabs.Tab[], force = false) {
   return trackGroupObjectChanges(async () => {
-    const initialStorage = await ensureUnfinishedArchives();
+    // session 在 SW 休眠后仍保留，只在 Chrome 重启后清空；首次运行也按新会话对账
+    // 会话标记与 local 的待归档枚举互不依赖，启动时并行读取
+    const session = chrome.storage.session;
+    const [sessionValue, initialStorage] = await Promise.all([
+      typeof session?.get === 'function' ? session.get(BROWSER_SESSION_KEY) : null,
+      ensureUnfinishedArchives(),
+    ]);
+    const browserRestart = sessionValue !== null && sessionValue[BROWSER_SESSION_KEY] !== true;
+    if (browserRestart) force = true;
+
     // 有待归档快照时跳过节流，优先保住旧组，再处理可能复用编号的新组
     if (unfinishedArchives.size) force = true;
     let tabs = allTabs ?? await rebuildGroupCache();
@@ -300,7 +316,9 @@ export function initBackupAllGroups(allTabs?: chrome.tabs.Tab[], force = false) 
       const elapsed = Date.now() - lastInitAt;
       if (elapsed >= 0 && elapsed < INIT_THROTTLE_MS) return;
     }
-    await reconcileBackup(tabs, initialStorage);
+    await reconcileBackup(tabs, initialStorage, browserRestart);
+    // 对账失败时不落标记，下次 SW 启动仍按新浏览器会话重试
+    if (browserRestart) await session.set({ [BROWSER_SESSION_KEY]: true });
   });
 }
 
@@ -315,6 +333,7 @@ function isLegacyBackup(value: unknown): value is { active?: Record<string, unkn
 async function reconcileBackup(
   allTabs: chrome.tabs.Tab[],
   initialStorage?: string[] | Record<string, unknown>,
+  browserRestart = false,
 ) {
   // 对账可能分批写 active、删旧 key；任一步失败都只损失缓存命中，后续备份会保守重写
   activeSnapshotCache.clear();
@@ -408,13 +427,6 @@ async function reconcileBackup(
     toRemove.push(LEGACY_KEY);
   }
 
-  // v2 死组复用单组归档的持久化保护；畸形 active 移除，避免卡住后续对账
-  const deadIds = [...storedActiveIds].filter(id => !liveIds.has(id));
-  for (const id of deadIds) {
-    if (prior.has(id)) await archiveGroup(id);
-    else toRemove.push(activeKey(id));
-  }
-
   const tabsByGroup = new Map<number, chrome.tabs.Tab[]>();
   for (const tab of allTabs) {
     if (tab.groupId >= 0) {
@@ -431,15 +443,62 @@ async function reconcileBackup(
     const entries = tabs && snapshotTabs(tabs);
     // 查询间隙变空的组保留最后 active，交给 onRemoved 或下次 init 归档
     if (!entries) continue;
-    const next = snapshotGroup(group, entries, now);
-    const key = activeKey(group.id);
-    const previous = prior.get(group.id);
+    currentSnapshots.push(snapshotGroup(group, entries, now));
+  }
+
+  const deadIds = [...storedActiveIds].filter(id => !liveIds.has(id));
+  const currentSnapshotIds = new Set(currentSnapshots.map(snapshot => snapshot.id));
+
+  // Chrome 会话恢复会更换组 ID，也可能把旧编号分配给另一个恢复组。全部旧、新快照都参与
+  // 唯一匹配；编号碰撞或交换不能绕过归档，也不能在写入后删掉另一个恢复组的新 active
+  const restoredActiveIds = new Map<number, number>();
+  if (browserRestart) {
+    const oldByIdentity = new Map<string, number[]>();
+    const add = (map: Map<string, number[]>, identity: string, id: number) => {
+      const ids = map.get(identity);
+      if (ids) ids.push(id);
+      else map.set(identity, [id]);
+    };
+    for (const id of storedActiveIds) {
+      const snapshot = prior.get(id);
+      if (snapshot) add(oldByIdentity, restoreIdentityOf(snapshot), id);
+    }
+    // 没有可匹配的旧快照时，不为全部实时组生成无用的恢复身份
+    if (oldByIdentity.size && currentSnapshots.length) {
+      const liveByIdentity = new Map<string, number[]>();
+      for (const snapshot of currentSnapshots) add(liveByIdentity, restoreIdentityOf(snapshot), snapshot.id);
+      for (const [identity, oldIds] of oldByIdentity) {
+        const liveMatches = liveByIdentity.get(identity);
+        if (oldIds.length === 1 && liveMatches?.length === 1) {
+          restoredActiveIds.set(oldIds[0], liveMatches[0]);
+        }
+      }
+    }
+  }
+
+  // 普通对账只处理死组。新会话还要先归档将被同编号新组覆盖的旧快照；已匹配恢复的旧键
+  // 只有在没有其他实时快照接管该编号时才删除，避免交换编号时先写后删把新快照一起删掉
+  const idsToReconcile = browserRestart ? [...storedActiveIds] : deadIds;
+  for (const id of idsToReconcile) {
+    const restoredId = restoredActiveIds.get(id);
+    if (restoredId !== undefined) {
+      if (restoredId !== id && !currentSnapshotIds.has(id)) toRemove.push(activeKey(id));
+    } else if (!liveIds.has(id)) {
+      if (prior.has(id)) await archiveGroup(id);
+      else toRemove.push(activeKey(id));
+    } else if (currentSnapshotIds.has(id) && prior.has(id)) {
+      await archiveGroup(id);
+    }
+  }
+
+  for (const next of currentSnapshots) {
+    const key = activeKey(next.id);
+    const previous = prior.get(next.id);
     // 全量对账只落盘新增、非规范或内容变化的组；规范且未变的快照保留原 updatedAt
     // v1 迁移已排的 active 写入仍换成最新快照，不让旧时间戳覆盖现有 v2 数据
-    if (key in toSet || !previous || !canonicalActiveIds.has(group.id) || !sameSnapshotContent(previous, next)) {
+    if (key in toSet || !previous || !canonicalActiveIds.has(next.id) || !sameSnapshotContent(previous, next)) {
       toSet[key] = next;
     }
-    currentSnapshots.push(next);
   }
 
   // 先写后删：归档或迁移写入失败时保留旧数据，删除失败至多下次产生重复归档
