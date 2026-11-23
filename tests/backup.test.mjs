@@ -504,6 +504,131 @@ test('整组标签尚无网址时，单组备份与启动对账都保留已有�
   assert.deepEqual(local.data['tabg:g:1'], snapshot);
 });
 
+test('Chrome 重启后唯一匹配的恢复组换用新 ID，不归档且不受 SW 节流影响', async () => {
+  const oldId = 501;
+  const restoredId = 502;
+  const local = createStorage({
+    'tabg:g:501': { ...snapshot, id: oldId },
+    'tabg:meta': { lastInitAt: Date.now() },
+  });
+  const session = createStorage();
+  const restoredGroup = { ...group, id: restoredId };
+  globalThis.chrome = {
+    storage: { local, session },
+    tabGroups: { async query() { return [restoredGroup]; } },
+  };
+
+  await initBackupAllGroups([{
+    groupId: restoredId,
+    index: 0,
+    url: snapshot.tabs[0].url,
+    title: '恢复加载后的新标题',
+  }]);
+
+  assert.equal(local.data['tabg:g:501'], undefined);
+  assert.equal(local.data['tabg:g:502'].id, restoredId);
+  assert.equal(local.data['tabg:g:502'].tabs[0].title, '恢复加载后的新标题');
+  assert.equal(Object.keys(local.data).some(key => key.startsWith('tabg:a:')), false);
+  assert.equal(session.data['tabg:browser-session'], true);
+});
+
+test('Chrome 重启时编号碰撞不会覆盖未匹配的旧快照', async () => {
+  const restored = { ...snapshot, id: 531, title: '恢复组', tabs: [{ url: 'https://restored.example/', title: '旧标题' }] };
+  const deleted = { ...snapshot, id: 532, title: '已删除组', tabs: [{ url: 'https://deleted.example/', title: '删除' }] };
+  const local = createStorage({
+    'tabg:g:531': restored,
+    'tabg:g:532': deleted,
+    'tabg:meta': { lastInitAt: Date.now() },
+  });
+  const session = createStorage();
+  const restoredGroup = { ...group, id: 532, title: restored.title };
+  globalThis.chrome = {
+    storage: { local, session },
+    tabGroups: { async query() { return [restoredGroup]; } },
+  };
+
+  await initBackupAllGroups([{
+    groupId: 532,
+    index: 0,
+    url: restored.tabs[0].url,
+    title: '恢复后的标题',
+  }]);
+
+  assert.equal(local.data['tabg:g:531'], undefined);
+  assert.equal(local.data['tabg:g:532'].title, restored.title);
+  assert.equal(onlyArchive(local, 532).title, deleted.title);
+  assert.equal(Object.keys(local.data).some(key => key.startsWith('tabg:a:531:')), false);
+});
+
+test('Chrome 重启后恢复组交换编号不会删除彼此的新快照', async () => {
+  const first = { ...snapshot, id: 541, title: '第一组', tabs: [{ url: 'https://first.example/', title: '一' }] };
+  const second = { ...snapshot, id: 542, title: '第二组', tabs: [{ url: 'https://second.example/', title: '二' }] };
+  const local = createStorage({ 'tabg:g:541': first, 'tabg:g:542': second });
+  const session = createStorage();
+  const restoredGroups = [
+    { ...group, id: 541, title: second.title },
+    { ...group, id: 542, title: first.title },
+  ];
+  globalThis.chrome = {
+    storage: { local, session },
+    tabGroups: { async query() { return restoredGroups; } },
+  };
+
+  await initBackupAllGroups([
+    { groupId: 541, index: 0, url: second.tabs[0].url, title: second.tabs[0].title },
+    { groupId: 542, index: 0, url: first.tabs[0].url, title: first.tabs[0].title },
+  ]);
+
+  assert.equal(local.data['tabg:g:541'].title, second.title);
+  assert.equal(local.data['tabg:g:542'].title, first.title);
+  assert.equal(Object.keys(local.data).some(key => key.startsWith('tabg:a:')), false);
+});
+
+test('同一 Chrome 会话内的 SW 重启仍按五分钟节流', async () => {
+  const local = createStorage({
+    'tabg:g:511': { ...snapshot, id: 511 },
+    'tabg:meta': { lastInitAt: Date.now() },
+  });
+  const session = createStorage({ 'tabg:browser-session': true });
+  let groupReads = 0;
+  globalThis.chrome = {
+    storage: { local, session },
+    tabGroups: { async query() { groupReads++; return []; } },
+  };
+
+  await initBackupAllGroups([]);
+
+  assert.equal(groupReads, 0);
+  assert.equal(local.data['tabg:g:511'].id, 511);
+  assert.equal(Object.keys(local.data).some(key => key.startsWith('tabg:a:')), false);
+});
+
+test('Chrome 重启后内容相同的多个恢复组不猜测旧快照归属', async () => {
+  const local = createStorage({
+    'tabg:g:521': { ...snapshot, id: 521 },
+    'tabg:meta': { lastInitAt: Date.now() },
+  });
+  const session = createStorage();
+  const restoredGroups = [{ ...group, id: 522 }, { ...group, id: 523 }];
+  globalThis.chrome = {
+    storage: { local, session },
+    tabGroups: { async query() { return restoredGroups; } },
+  };
+  const tabs = restoredGroups.map(item => ({
+    groupId: item.id,
+    index: 0,
+    url: snapshot.tabs[0].url,
+    title: snapshot.tabs[0].title,
+  }));
+
+  await initBackupAllGroups(tabs);
+
+  assert.equal(onlyArchive(local, 521).id, 521);
+  assert.equal(local.data['tabg:g:521'], undefined);
+  assert.equal(local.data['tabg:g:522'].id, 522);
+  assert.equal(local.data['tabg:g:523'].id, 523);
+});
+
 test('系统时钟回拨后仍执行启动对账', async () => {
   const local = createStorage({ 'tabg:meta': { lastInitAt: Date.now() + 86_400_000 }, 'tabg:g:1': snapshot });
   globalThis.chrome = { storage: { local }, tabGroups: { async query() { return []; } } };

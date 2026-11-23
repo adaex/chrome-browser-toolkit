@@ -117,16 +117,18 @@ test('代理状态读取 Chrome 实际配置和外部控制状态', async () => 
   });
 });
 
-test('直连、本机代理和其他模式使用不同状态图标', async () => {
+test('直连、本机代理、系统代理和其他模式使用对应状态图标', async () => {
   const { icons, titles } = installChrome();
 
   await syncProxyIndicator();
   await applyProxyWrite({ operation: 'setMode', mode: 'socks5' });
   await syncProxyIndicator();
-  const { icons: otherIcons, titles: otherTitles } = installChrome({ value: { mode: 'system' } });
+  const { icons: systemIcons, titles: systemTitles } = installChrome({ value: { mode: 'system' } });
+  await syncProxyIndicator();
+  const { icons: otherIcons, titles: otherTitles } = installChrome({ value: { mode: 'auto_detect' } });
   await syncProxyIndicator();
 
-  for (const { path } of [...icons, ...otherIcons]) {
+  for (const { path } of [...icons, ...systemIcons, ...otherIcons]) {
     for (const iconPath of Object.values(path)) {
       assert.ok(iconPath.startsWith('/'), `Service Worker 图标必须使用根路径：${iconPath}`);
     }
@@ -134,6 +136,8 @@ test('直连、本机代理和其他模式使用不同状态图标', async () =>
   assert.equal(icons[0].path[16], '/icon/icon_16.png');
   assert.equal(icons[1].path[16], '/icon/socks5_16.png');
   assert.match(titles[1].title, /127\.0\.0\.1:7890/);
+  assert.equal(systemIcons[0].path[16], '/icon/other_16.png');
+  assert.match(systemTitles[0].title, /跟随系统设置/);
   assert.equal(otherIcons[0].path[16], '/icon/other_16.png');
   assert.match(otherTitles[0].title, /其他代理模式/);
 });
