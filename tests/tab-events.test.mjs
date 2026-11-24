@@ -144,7 +144,8 @@ test('后台导航不新排去重，当前标签导航仍执行', async t => {
   assert.deepEqual(activated, []);
   assert.deepEqual(removed, []);
 
-  listeners.updated(2, { url: tabs[1].url }, { ...tabs[1], active: true });
+  tabs[1].active = true;
+  listeners.updated(2, { url: tabs[1].url }, tabs[1]);
   await drain();
   assert.equal(queries.callCount(), 1);
   assert.deepEqual(activated, [1]);
@@ -249,4 +250,48 @@ test('仅调整组内顺序也会更新快照，随后归档保留新顺序', as
   listeners.groupRemoved({ id: 7 });
   await drain();
   assert.deepEqual(titles(onlyArchive(local, 7)), ['1', '3', '2']);
+});
+
+test('当前标签导航后切到后台，不再按旧事件去重', async () => {
+  const existing = { ...tab(201), url: 'https://example.com/shared' };
+  const source = { ...tab(202), active: true, url: existing.url };
+  const { listeners } = await start('deactivated-before-check', [existing, source]);
+  const activated = [];
+  const removed = [];
+  chrome.windows = { async get() { return { focused: true }; } };
+  chrome.tabs.update = async id => { activated.push(id); };
+  chrome.tabs.remove = async id => { removed.push(id); };
+
+  listeners.updated(source.id, { url: source.url }, source);
+  source.active = false;
+  await drain();
+
+  assert.deepEqual(activated, []);
+  assert.deepEqual(removed, []);
+});
+
+test('标签 ID 为 0 时仍参与创建后的去重', async () => {
+  const existing = { ...tab(210), url: 'https://example.com/shared-zero' };
+  const created = { ...tab(211), id: 0, index: 1, url: existing.url };
+  const { listeners } = await start('zero-tab-id', [existing, created]);
+  const removed = [];
+  chrome.tabs.update = async () => {};
+  chrome.tabs.remove = async id => { removed.push(id); };
+
+  listeners.created(created);
+  await drain();
+
+  assert.deepEqual(removed, [0]);
+});
+
+test('opener 标签 ID 为 0 时不误判为无 opener 的新窗口', async () => {
+  const item = { ...tab(220), openerTabId: 0, index: 0 };
+  const { listeners } = await start('zero-opener-id', [item]);
+  let windowReads = 0;
+  chrome.windows = { async getAll() { windowReads++; return []; } };
+
+  listeners.created(item);
+  await drain();
+
+  assert.equal(windowReads, 0);
 });

@@ -9,7 +9,11 @@ export function isProxySwitchUrl(url: string): boolean {
 
 // 监听 tab 的创建和更新事件，检查是否有重复的 tab
 // 返回 true 表示新标签已被关闭（重复命中），调用方不要再操作这个标签
-export async function checkDuplicate(tabId: number, isCurrent: (id: number) => boolean = () => true): Promise<boolean> {
+export async function checkDuplicate(
+  tabId: number,
+  isCurrent: (id: number) => boolean = () => true,
+  requireActive = false,
+): Promise<boolean> {
   // 获取所有的 tabs，调用浏览器 api
   const tabs = await chrome.tabs.query({});
   if (!isCurrent(tabId)) return false;
@@ -18,8 +22,8 @@ export async function checkDuplicate(tabId: number, isCurrent: (id: number) => b
   const tab = tabs.find(item => item.id === tabId);
   const url = tab ? effectiveUrl(tab) : '';
 
-  // 异常不存在，直接忽略
-  if (tab?.id == null) return false;
+  // 异常不存在，或当前标签导航后已切到后台，直接忽略
+  if (tab?.id == null || (requireActive && !tab.active)) return false;
 
   // 外部切换失败后可能保留页面，重试相同 URL 时不能被当成普通重复标签关掉
   if (isProxySwitchUrl(url)) return false;
@@ -33,15 +37,15 @@ export async function checkDuplicate(tabId: number, isCurrent: (id: number) => b
   // 目标不存在，直接忽略
   if (!duplicates.length) return false;
 
+  // 新建页面只保留最新打开的一个：直接关闭全部历史标签，保留当前标签（不查 pinned，有意）
+  if (url.startsWith('chrome://new') || url === 'about:blank') {
+    await chrome.tabs.remove(duplicates.map(other => other.id!));
+    return false;
+  }
+
   // 选出优先级最高的老标签，执行同一规则指定的操作
   const { target: existedTab, preference } = pickTarget(duplicates, tab);
   if (existedTab.id == null) return false;
-
-  // 新建页面只保留最新打开的一个：直接关闭历史标签，保留当前标签（不查 pinned，有意）
-  if (url.startsWith('chrome://new') || url === 'about:blank') {
-    await chrome.tabs.remove(existedTab.id);
-    return false;
-  }
 
   // 固定标签的位置是用户明确保留的，普通网址导航不把它当作可关闭的新标签
   if (tab.pinned) return false;
@@ -105,7 +109,7 @@ export async function toFullscreenWindow(tabId: number, windowId: number, beginM
   const fullscreenWindows = windows.filter(window => window.state === 'fullscreen' && window.type === 'normal');
   // 没有唯一目标时直接返回，避免为不会执行的移动再序列化源窗口的全部标签
   const fullscreenWindow = fullscreenWindows.length === 1 ? fullscreenWindows[0] : undefined;
-  if (!fullscreenWindow?.id) return;
+  if (fullscreenWindow?.id == null) return;
 
   const currentWindow = await chrome.windows.get(windowId, { populate: true });
   // 多个全屏窗口时无法判断用户想去哪个，宁可不移动；index === 0 也不等于新窗口

@@ -41,7 +41,11 @@ function startNormalMode() {
           const sourceWindow = await chrome.windows.get(check.focusedWindowId);
           if (!sourceWindow.focused || !isCurrent(tabId)) return;
         }
-        const removed = settings.deduplicate && await checkDuplicate(tabId, isCurrent);
+        const removed = settings.deduplicate && await checkDuplicate(
+          tabId,
+          isCurrent,
+          check.focusedWindowId !== undefined,
+        );
         if (!isCurrent(tabId) || removed || !settings.fullscreen || check.newWindowId === undefined) return;
         check.merged = false;
         await toFullscreenWindow(tabId, check.newWindowId, () => {
@@ -110,13 +114,13 @@ function startNormalMode() {
 
   chrome.tabs.onCreated.addListener(tab => {
     const tabId = tab.id;
-    if (!tabId) return;
+    if (tabId == null) return;
     noteGroup(tabId, tab.groupId);
 
     // 一次性代理切换页不参与标签管理，避免失败后的同 URL 重试被合并或移动
     if (isProxySwitchUrl(effectiveUrl(tab))) return;
 
-    scheduleTabCheck(tabId, !tab.openerTabId && tab.index === 0 ? tab.windowId : undefined);
+    scheduleTabCheck(tabId, tab.openerTabId == null && tab.index === 0 ? tab.windowId : undefined);
   });
 
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {

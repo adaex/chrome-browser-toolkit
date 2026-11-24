@@ -84,19 +84,19 @@ test('从同网址 opener 打开时保留重复标签', async () => {
   assert.equal(await checkDuplicate(newTab.id), false);
 });
 
-test('空白页面保留新打开的标签并关闭旧标签', async () => {
-  const oldTab = { id: 1, url: 'about:blank', groupId: -1, windowId: 1, pinned: false };
-  const newTab = { ...oldTab, id: 2 };
+test('空白页面只保留新打开的标签并关闭全部旧标签', async () => {
+  const oldTabs = [1, 3].map(id => ({ id, url: 'about:blank', groupId: -1, windowId: 1, pinned: false }));
+  const newTab = { ...oldTabs[0], id: 2 };
   const removed = [];
   globalThis.chrome = {
     tabs: {
-      async query() { return [oldTab, newTab]; },
-      async remove(id) { removed.push(id); },
+      async query() { return [...oldTabs, newTab]; },
+      async remove(ids) { removed.push(...ids); },
     },
   };
 
   assert.equal(await checkDuplicate(newTab.id), false);
-  assert.deepEqual(removed, [oldTab.id]);
+  assert.deepEqual(removed, [1, 3]);
 });
 
 test('固定标签导航到已打开的普通网址时保留固定标签', async () => {
@@ -158,6 +158,12 @@ const fullscreenCases = [
   {
     name: '全屏吸附前发现 URL 晚到的代理切换页时保留原窗口',
     sourceTabs: [{ id: 2, pendingUrl: 'chrome-extension://test-extension/switch.html?mode=direct' }],
+    expectedWindowReads: 1,
+  },
+  {
+    name: '全屏窗口 ID 为 0 时仍能吸附',
+    windows: [normalWindow, { ...fullscreenWindow, id: 0 }],
+    expectedCalls: ['move', 'activate', 'focus'],
     expectedWindowReads: 1,
   },
   {
