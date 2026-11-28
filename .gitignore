@@ -4,3 +4,5 @@ dist
 *.zip
 /.env
 /tools/google-cloud-sdk/
+__pycache__/
+*.pyc
